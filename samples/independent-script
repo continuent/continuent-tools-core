@@ -1,0 +1,51 @@
+#!/usr/bin/env ruby
+# Copyright (C) 2014 Continuent, Inc.
+# 
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License.  You may obtain
+# a copy of the License at
+# 
+#         http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+# License for the specific language governing permissions and limitations
+# under the License.
+#
+# Initial developer(s): Jeff Mace
+# Contributor(s):
+
+begin
+  require 'rubygems'
+  gem 'continuent-tools-core'
+rescue LoadError
+end
+
+require 'continuent-tools-core'
+
+# This script will run without being able to find an active
+# instance of Continuent Tungsten
+class IndependentScript
+  include TungstenScript
+  
+  def main
+    TU.notice("I am not running against a Tungsten directory")
+  end
+  
+  def configure
+    super()
+    
+    require_installed_directory?(false)
+  end
+  
+  def validate
+    super()
+  end
+  
+  def script_name
+    "independent-script"
+  end
+end
+
+IndependentScript.new().run()
