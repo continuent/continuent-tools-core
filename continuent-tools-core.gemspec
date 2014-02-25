@@ -21,7 +21,7 @@
 
 Gem::Specification.new do |s|
   s.name        = 'continuent-tools-core'
-  s.version     = '0.0.0'
+  s.version     = '0.0.1'
   s.date        = '2014-02-24'
   s.summary     = "Continuent Tools core functions"
   s.authors     = ["Continuent"]
