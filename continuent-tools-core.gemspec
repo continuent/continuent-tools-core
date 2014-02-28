@@ -21,8 +21,8 @@
 
 Gem::Specification.new do |s|
   s.name        = 'continuent-tools-core'
-  s.version     = '0.0.3'
-  s.date        = '2014-02-24'
+  s.version     = '0.0.4'
+  s.date        = Date.today.to_s
   s.summary     = "Continuent Tools core functions"
   s.authors     = ["Continuent"]
   s.email       = 'info@continuent.com'
@@ -33,7 +33,6 @@ Gem::Specification.new do |s|
   s.homepage    =
     'https://github.com/continuent/continuent-tools-core'
   s.license       = 'Apache-2.0'
-  s.add_runtime_dependency 'json'
   s.add_runtime_dependency 'net-ssh'
   s.add_runtime_dependency 'net-scp'
   s.add_runtime_dependency 'xhr-ifconfig'

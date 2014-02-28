@@ -3,7 +3,7 @@ continuent-tools-core
 
 The continuent-tools-core is a package of libraries that are found in Tungsten Replicator. When the gem is built, these files are automatically exported from [https://code.google.com/p/tungsten-replicator/](https://code.google.com/p/tungsten-replicator/).
 
-    gem install continuent-tools-core
+    gem install json_pure continuent-tools-core
 
 Script Structure
 ---
