@@ -21,12 +21,15 @@
 
 Gem::Specification.new do |s|
   s.name        = 'continuent-tools-core'
-  s.version     = '0.0.1'
+  s.version     = '0.0.3'
   s.date        = '2014-02-24'
   s.summary     = "Continuent Tools core functions"
   s.authors     = ["Continuent"]
   s.email       = 'info@continuent.com'
   s.files       = Dir.glob("{bin,lib}/**/*") + %w(LICENSE README.md)
+  Dir.glob("bin/*").each{|bin|
+    s.executables << File.basename(bin)
+  }
   s.homepage    =
     'https://github.com/continuent/continuent-tools-core'
   s.license       = 'Apache-2.0'
