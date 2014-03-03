@@ -18,3 +18,24 @@
 # The tungsten.rb file is exported into the gem from 
 # https://code.google.com/p/tungsten-replicator/
 require 'tungsten'
+
+class TungstenUtil
+  # A wrapper for running another Tungsten script. This will automatically
+  # forward messages to the console and add any TungstenScript options to 
+  # the command.
+  def tungsten_cmd_result(command)
+    original_fwd_state = forward_cmd_results?()
+    begin
+      if TI
+        prefix = "export CONTINUENT_ROOT=#{TI.root()}; "
+      else
+        prefix = ""
+      end
+      
+      forward_cmd_results?(true)
+      return cmd_result("#{prefix}#{command} #{get_tungsten_command_options()}")
+    ensure
+      forward_cmd_results?(original_fwd_state)
+    end
+  end
+end
