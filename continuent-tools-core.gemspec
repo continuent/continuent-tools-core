@@ -21,9 +21,9 @@
 
 Gem::Specification.new do |s|
   s.name        = 'continuent-tools-core'
-  s.version     = '0.0.6'
+  s.version     = '0.1.0'
   s.date        = Date.today.to_s
-  s.summary     = "Continuent Tools core functions"
+  s.summary     = "Continuent Tungsten tools core functions"
   s.authors     = ["Continuent"]
   s.email       = 'info@continuent.com'
   s.files       = Dir.glob("{bin,lib}/**/*") + %w(LICENSE README.md)
