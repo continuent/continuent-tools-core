@@ -1,0 +1,180 @@
+#!/usr/bin/env ruby
+# Copyright (C) 2014 Continuent, Inc.
+# 
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License.  You may obtain
+# a copy of the License at
+# 
+#         http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+# License for the specific language governing permissions and limitations
+# under the License.
+#
+# Initial developer(s): Jeff Mace
+# Contributor(s):
+
+begin
+  require 'rubygems'
+  gem 'continuent-tools-core'
+rescue LoadError
+end
+
+require 'continuent-tools-core'
+
+class ContinuentCreateLoad
+  include TungstenScript
+  include MySQLServiceScript
+  private
+  
+  @@interrupted = false
+  
+  def main
+    old_trap = trap("INT") {
+      ContinuentCreateLoad.interrupted?(true);
+    }
+    
+    # Create the schema we will load data into using the local connection
+    TU.cmd(get_mysql_command(), false, method(:initialize_schema), nil, method(:forward_mysql_errors))
+    sleep 2
+    
+    # Create a list of all load generation threads that should be started
+    load_threads = []
+    opt(:hosts).each{
+      |host|
+      i = 0
+      while (i < opt(:threads).to_i())
+        load_threads << {:host => host}
+        i = i+1
+      end
+    }
+    # Spin up an independent thread for each configuration of the load
+    # generation thread.
+    load_threads.peach{
+      |load_thread|
+      TU.cmd(get_mysql_command() + " -h#{load_thread[:host]}", true, method(:create_schema_load), nil, method(:forward_mysql_errors))
+    }
+    
+    puts("\n")
+    trap("INT", old_trap);
+  end
+  
+  def initialize_schema(stdin)
+    [
+      "DROP SCHEMA IF EXISTS tungsten_create_load;",
+      "CREATE SCHEMA tungsten_create_load;",
+      "CREATE TABLE tungsten_create_load.values (id int NOT NULL auto_increment primary key, val int NOT NULL, origin varchar(32) NULL);"
+    ].each{|sql|
+      stdin.puts(sql)
+      putc '.'
+      $stdout.flush()
+    }
+  end
+  
+  def create_schema_load(stdin)
+    sql = "INSERT INTO tungsten_create_load.values (val, origin) VALUES (5, @@hostname);"
+    while (ContinuentCreateLoad.interrupted?() == false)
+      stdin.puts(sql)
+      putc '.'
+      $stdout.flush()
+      sleep opt(:sleep).to_i()
+    end
+  end
+  
+  def forward_mysql_errors(msg)
+    TU.error(msg)
+  end
+  
+  def configure
+    super()
+    
+    add_option(:hosts, {
+      :on => "--hosts String",
+      :help => "Coordinate load generation on these servers in addition to the current host",
+    })
+    
+    add_option(:threads, {
+      :on => "--threads String",
+      :parse => method(:parse_integer_option),
+      :help => "How many parallel threads should be used to generate load",
+      :default => 1,
+    })
+    
+    add_option(:sleep, {
+      :on => "--sleep String",
+      :parse => method(:parse_integer_option),
+      :help => "How many seconds to wait between load transactions",
+      :default => 1,
+    })
+    
+    add_option(:use_connector, {
+      :on => "--use-connector String",
+      :parse => method(:parse_boolean_option),
+      :help => "Enable/Disable use of the Tungsten Connector for adding load to the system.",
+    })
+  end
+  
+  def validate
+    super()
+    
+    unless TU.is_valid?()
+      return TU.is_valid?()
+    end
+    
+    if opt(:use_connector) == nil
+      if TI.is_connector?()
+        opt(:use_connector, true)
+        
+        unless TI.is_running?("connector")
+          TU.error("The Tungsten Connector is not running")
+        end
+        
+        defaults_file = Tempfile.new("tungsten_nagios_connector")
+        opt(:my_cnf, defaults_file.path())
+
+        defaults_file.puts("[client]")
+        defaults_file.puts("user=#{TI.setting(TI.setting_key(CONNECTORS, "connector_user"))}")
+        defaults_file.puts("password=#{TI.setting(TI.setting_key(CONNECTORS, "connector_password"))}")
+        defaults_file.flush()
+        
+        opt(:mysqlport, TI.setting(TI.setting_key(CONNECTORS, "connector_listen_port")))
+        opt(:mysqlhost, TI.hostname())
+      elsif TI.is_replicator?()
+        opt(:use_connector, false)
+        
+        if TI.setting(TI.setting_key(REPL_SERVICES, @options[:service], "repl_datasource_type")) != "mysql"
+          TU.error("Unable to create load on this system because it is not configured for MySQL")
+        end
+      else
+        TU.error("Unable to create load on this system because it is not configured as a Tungsten Connector or Tungsten Replicator")
+      end
+    end
+    
+    if opt(:hosts) != nil
+      hosts = opt(:hosts).split(",").uniq().delete_if{
+        |h|
+        (h == TI.hostname())
+      }
+      hosts << TI.hostname()
+      opt(:hosts, hosts)
+    else
+      opt(:hosts, [TI.hostname()])
+    end
+  end
+  
+  def script_name
+    "tungsten_create_load"
+  end
+  
+  def self.interrupted?(val = nil)
+    if val != nil
+      @@interrupted = val
+    end
+    
+    (@@interrupted == true)
+  end
+  
+  self.new().run()
+end
