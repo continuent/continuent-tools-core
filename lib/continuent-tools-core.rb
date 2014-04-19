@@ -156,17 +156,17 @@ end
 
 class Array
   def peach(&block)
-    pids = []
-    results = []
-    idx = 0
-
+    threads = []
+    
     self.each{
       |i|
-      pids[idx] = fork {
-        block.call(i)
+      threads << Thread.new(i) {
+        |member|
+        block.call(member)
       }
-      idx = idx+1
     }
-    pids.each{|pid| Process.waitpid(pid) }
+    
+    threads.each{|t| t.join() }
+    self
   end
 end
