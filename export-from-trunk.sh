@@ -21,4 +21,9 @@ cd `dirname $0`/lib
 rm -f ./tungsten.rb
 svn export https://tungsten-replicator.googlecode.com/svn/trunk/builder/extra/cluster-home/lib/ruby/tungsten.rb
 rm -rf ./tungsten
-svn export https://tungsten-replicator.googlecode.com/svn/trunk/builder/extra/cluster-home/lib/ruby/tungsten 
+svn export https://tungsten-replicator.googlecode.com/svn/trunk/builder/extra/cluster-home/lib/ruby/tungsten
+
+rm -f ./iniparse.rb
+svn export https://tungsten-replicator.googlecode.com/svn/trunk/builder/extra/cluster-home/lib/ruby/iniparse.rb
+rm -rf ./iniparse
+svn export https://tungsten-replicator.googlecode.com/svn/trunk/builder/extra/cluster-home/lib/ruby/iniparse 

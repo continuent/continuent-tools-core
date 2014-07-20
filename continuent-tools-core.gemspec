@@ -26,7 +26,7 @@ Gem::Specification.new do |s|
   s.summary     = "Continuent Tungsten tools core functions"
   s.authors     = ["Continuent"]
   s.email       = 'info@continuent.com'
-  s.files       = Dir.glob("{bin,lib}/**/*") + %w(LICENSE README.md)
+  s.files       = Dir.glob("{bin,lib,providers}/**/*") + %w(LICENSE README.md)
   Dir.glob("bin/*").each{|bin|
     s.executables << File.basename(bin)
   }

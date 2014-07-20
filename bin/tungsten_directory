@@ -1,0 +1,174 @@
+#!/usr/bin/env ruby
+# Copyright (C) 2014 Continuent, Inc.
+# 
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License.  You may obtain
+# a copy of the License at
+# 
+#         http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+# License for the specific language governing permissions and limitations
+# under the License.
+#
+# Initial developer(s): Jeff Mace
+# Contributor(s):
+
+begin
+  require 'rubygems'
+  gem 'continuent-tools-core'
+rescue LoadError
+end
+
+require 'continuent-tools-core'
+
+class TungstenDirectoryProvider
+  def initialize(key)
+    @key = key
+  end
+  
+  def self.inherited(subclass)
+    @subclasses ||= []
+    @subclasses << subclass
+  end
+  
+  def self.subclasses
+    @subclasses
+  end
+  
+  def self.get_provider(key)
+    @subclasses.each{
+      |klass|
+      
+      regex = Regexp.new(klass.get_regex())
+      if key =~ regex
+        return klass.new(key)
+      end
+    }
+    
+    nil
+  end
+end
+
+Dir.glob(File.dirname(__FILE__) + '/../providers/*.rb').each do |file| 
+  begin
+    require file
+  rescue IgnoreError
+  end
+end
+
+class TungstenDirectory
+  include TungstenScript
+  private
+  
+  def main
+    found_files = false
+    directory_entries = {}
+    
+    Dir.glob(opt(:config)).each{
+      |f|
+      found_files = true
+      
+      # Parse the configuration file and remove any sections
+      # that may hold command line options
+      contents = TU.parse_ini_file(f)
+      contents.delete("tungsten_directory")
+      contents.delete("directory")
+      
+      # Iterate through each section and merge directory entries
+      contents.each{
+        |k,v|
+        
+        matches = k.match("autodetect.(.*)")
+        if matches != nil and matches.size() > 0
+          # Search for a matching autodetect provider
+          provider = TungstenDirectoryProvider.get_provider(matches[1])
+          unless provider == nil
+            directory_entries.merge!(provider.get_entries(v))
+          else
+            TU.error("Unable to autodetect #{matches[1]} entries")
+          end
+        else
+          # Build a manual entry and add it to the list
+          directory_entries[k] = parse_directory_entry(v)
+        end
+      }
+    }
+    
+    if found_files == false
+      TU.error("Unable to find any files matching #{opt(:config)}")
+    end
+    
+    # Modify each directory entry and prepare it for output
+    directory_entries.each{
+      |id,entry|
+      unless entry["tags"].is_a?(Hash)
+        next
+      end
+      
+      entry["tags"].each{
+        |k,v|
+        v = v.split(",")
+        if v.size() > 1
+          entry["tags"][k] = v
+        end
+      }
+    }
+    
+    if TU.is_valid?
+      TU.output(JSON.pretty_generate(directory_entries))
+    end
+  end
+  
+  def parse_directory_entry(e)
+    entry = e.dup()
+    entry["tags"] = {}
+    
+    e.keys().each{
+      |k|
+      parts = k.split(".")
+      if parts.size() == 1
+        next
+      end
+      
+      type = parts.shift()
+      remainder = parts.join(".")
+      
+      case type
+      when "tags"
+        entry["tags"][remainder] = entry[k]
+        entry.delete(k)
+      end
+    }
+    
+    return entry
+  end
+  
+  def configure
+    super()
+    
+    require_installed_directory?(false)
+    
+    add_option(:config, {
+      :on => "--config String",
+      :help => "Path to INI file that holds directory information",
+      :default => "/etc/tungsten/directory.ini"
+    })
+  end
+  
+  def validate
+    super()
+    
+    unless TU.is_valid?()
+      return TU.is_valid?()
+    end
+  end
+  
+  def script_name
+    "tungsten_directory"
+  end
+  
+  self.new().run()
+end

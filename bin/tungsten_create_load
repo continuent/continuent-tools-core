@@ -65,7 +65,12 @@ class ContinuentCreateLoad
     [
       "DROP SCHEMA IF EXISTS tungsten_create_load;",
       "CREATE SCHEMA tungsten_create_load;",
-      "CREATE TABLE tungsten_create_load.values (id int NOT NULL auto_increment primary key, val int NOT NULL, origin varchar(32) NULL);"
+      "CREATE TABLE tungsten_create_load.values (
+        id int NOT NULL auto_increment primary key, 
+        val int NOT NULL, 
+        origin varchar(32) NULL,
+        filler varchar(1024) NULL
+      );"
     ].each{|sql|
       stdin.puts(sql)
       putc '.'
@@ -74,7 +79,8 @@ class ContinuentCreateLoad
   end
   
   def create_schema_load(stdin)
-    sql = "INSERT INTO tungsten_create_load.values (val, origin) VALUES (5, @@hostname);"
+    value = ""; 1024.times{value << ((rand(2)==1?65:97) + rand(25)).chr}
+    sql = "INSERT INTO tungsten_create_load.values (val, origin, filler) VALUES (5, @@hostname, '#{value}');"*[opt(:chunk_size),1].max()
     while (ContinuentCreateLoad.interrupted?() == false)
       stdin.puts(sql)
       putc '.'
@@ -100,6 +106,13 @@ class ContinuentCreateLoad
       :parse => method(:parse_integer_option),
       :help => "How many parallel threads should be used to generate load",
       :default => 1,
+    })
+    
+    add_option(:chunk_size, {
+      :on => "--chunk-size String",
+      :parse => method(:parse_integer_option),
+      :help => "How many rows should be entered per iteration",
+      :default => 10,
     })
     
     add_option(:sleep, {

@@ -20,3 +20,5 @@ doc/
 # Ignore these since they are exported from code.google.com
 lib/tungsten.rb
 lib/tungsten/*
+lib/iniparse.rb
+lib/iniparse/*
