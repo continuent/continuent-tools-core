@@ -56,6 +56,7 @@ class AWSEC2TungstenDirectoryProvider < TungstenDirectoryProvider
           
           TU.debug("Found #{ins.id}")
           region_results[index][ins.id] = {
+            'hostname' => tags.to_h()["Name"],
             'location' => ins.availability_zone,
             'public-address' => ins.public_ip_address,
             'private-address' => ins.private_ip_address,

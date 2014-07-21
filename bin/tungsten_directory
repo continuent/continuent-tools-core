@@ -98,7 +98,8 @@ class TungstenDirectory
     }
     
     if found_files == false
-      TU.error("Unable to find any files matching #{opt(:config)}")
+      TU.error("Unable to find any files at #{opt(:config)}")
+      return
     end
     
     # Modify each directory entry and prepare it for output
@@ -125,6 +126,7 @@ class TungstenDirectory
   def parse_directory_entry(e)
     entry = e.dup()
     entry["tags"] = {}
+    entry["provider"] = "ini"
     
     e.keys().each{
       |k|

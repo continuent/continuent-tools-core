@@ -1,0 +1,422 @@
+#!/usr/bin/env ruby
+# Copyright (C) 2014 Continuent, Inc.
+# 
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License.  You may obtain
+# a copy of the License at
+# 
+#         http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+# License for the specific language governing permissions and limitations
+# under the License.
+#
+# Initial developer(s): Jeff Mace
+# Contributor(s):
+
+begin
+  require 'rubygems'
+  gem 'continuent-tools-core'
+rescue LoadError
+end
+
+require 'continuent-tools-core'
+require 'digest/md5'
+
+class TungstenManageConfiguration
+  include TungstenScript
+  private
+  
+  SERVER_TYPE = "tungsten-ServerType"
+  CLUSTER_NAME = "tungsten-ClusterName"
+  COMPOSITE_CLUSTER_NAME = "tungsten-CompositeClusterName"
+  COMPOSITE_CLUSTER_MASTER = "tungsten-CompositeClusterMaster"
+  ARCHIVE_CLUSTERS = "tungsten-ArchiveClusters"
+  CONNECTOR_CLUSTERS = "tungsten-ConnectorClusters"
+  
+  def main
+    # Calculate the starting signature and contents of the INI file
+    initial_md5sum = nil
+    initial_contents = nil
+    if File.exists?(opt(:outputfile))
+      File.open(opt(:outputfile), "r") {
+        |f|
+        initial_md5sum = Digest::MD5.hexdigest(f.read())
+      }
+      initial_contents = TU.parse_ini_file(opt(:outputfile))
+    end
+    
+    directory_entries = load_directory_entries()
+    entry_key = find_directory_entry_key(directory_entries, opt(:hostname))
+    services = generate_services_map(directory_entries)
+    pending_ini = write_ini_configuration(services, directory_entries[entry_key])
+
+    # Rewind and calculate the pending INI md5sum
+    pending_ini.rewind()
+    pending_md5sum = Digest::MD5.hexdigest(pending_ini.read())
+    pending_contents = TU.parse_ini_file(pending_ini.path())
+    # Add a diff to the debug log for review purposes
+    TU.cmd_result("diff -u #{opt(:outputfile)} #{pending_ini.path()}", true)
+
+    if initial_md5sum != pending_md5sum
+      TU.notice("Update the INI file and system configuration")
+      FileUtils.cp(pending_ini.path(), opt(:outputfile))
+      FileUtils.cp(pending_ini.path(), opt(:originalfile))
+      
+      types = directory_entries[entry_key]["tags"][SERVER_TYPE]
+      if types.include?("datasource") || types.include?("connector")
+        # Install or Update Continuent Tungsten
+      end
+      if types.include?("archive")
+        # Install or Update Tungsten Replicator
+      end
+    else
+      TU.debug("Do nothing because there are no changes")
+    end
+  end
+  
+  # Returns a parsed version of the output from tungsten_directory
+  def load_directory_entries
+    begin
+      json = TU.cmd_result("tungsten_directory")
+    rescue CommandError => ce
+      raise MessageError.new("Unable to manage configuration because the tungsten_directory command failed")
+    end
+    
+    begin
+      entries = JSON.parse(json)
+    rescue
+      entries = nil
+    end
+    
+    unless entries.is_a?(Hash)
+      raise MessageError.new("Unable to manage configuration because the tungsten_directory command did not return valid JSON")
+    end
+    
+    return entries
+  end
+  
+  # Find the hash key that matches this hostname
+  def find_directory_entry_key(entries, hostname)
+    entries.each{
+      |k,v|
+      if v["hostname"] == hostname
+        return k
+      end
+    }
+    
+    raise MessageError.new("Unable to find a directory entry for '#{hostname}'")
+  end
+  
+  # Take the information from tungsten_directory and turn it into
+  # a set of cluster data that could be written to the INI file
+  def generate_services_map(entries)
+    map = {}
+    is_valid = true
+    
+    entries.each{
+      |k,entry|
+      types = entry["tags"][SERVER_TYPE]
+      unless types.is_a?(Array)
+        types = [types]
+      end
+      
+      types.each{
+        |type|
+        begin
+          case type
+          when "datasource"
+            generate_datasource_services_map(map, entry)
+          when "connector"
+            generate_connector_services_map(map, entry)
+          when "archive"
+            generate_archive_services_map(map, entry)
+          else
+            raise MessageError.new("Unable to process a #{SERVER_TYPE} of #{type} for #{entry["hostname"]}")
+          end
+        rescue MessageError => me
+          is_valid = false
+          TU.error(me.message)
+        end
+      }
+    }
+    
+    unless is_valid == true
+      raise MessageError.new("Unable to proceed due to issues with the directory entries")
+    end
+    
+    map
+  end
+  
+  def generate_datasource_services_map(map, entry)
+    svc = entry["tags"][CLUSTER_NAME]
+    if svc.to_s() == ""
+      raise MessageError.new "Unable to create the cluster on #{entry['hostname']} because it does not have a value for the '#{CLUSTER_NAME}' tag."
+    end
+    
+    unless map.has_key?(svc)
+      map[svc] = {}
+    end
+    unless map[svc].has_key?("members")
+      map[svc]["members"] = []
+    end
+    
+    # Initiate the cluster
+    map[svc]["topology"] = "clustered"
+    
+    # Add the host to the cluster
+    map[svc]["members"] << entry["hostname"]
+    map[svc]["members"].uniq!()
+    map[svc]["members"].sort!()
+    
+    composite_svc = entry["tags"][COMPOSITE_CLUSTER_NAME]
+    if composite_svc.to_s() != ""
+      unless map.has_key?(composite_svc)
+        map[composite_svc] = {}
+      end
+      unless map[composite_svc].has_key?("composite-datasources")
+        map[composite_svc]["composite-datasources"] = []
+      end
+      
+      # Add this cluster to the composite cluster
+      map[composite_svc]["composite-datasources"] << svc
+      
+      # Define the replication relay source for this cluster
+      composite_master = entry["tags"][COMPOSITE_CLUSTER_MASTER]
+      if composite_master.to_s() == ""
+        raise MessageError.new "Unable to create the '#{composite_svc}' composite cluster because #{entry['hostname']} does not define the '#{COMPOSITE_CLUSTER_MASTER}' tag."
+      end
+      
+      # Set relay-source if this cluster is not the master
+      # Throw an error if another cluster has specified a different
+      # composite cluster master
+      unless map[svc].has_key?("relay-source")
+        unless composite_master == svc
+          map[svc]["relay-source"] = composite_master
+        end
+      else
+        if composite_master != map[svc]["relay-source"]
+          raise MessageError.new "Unable to create the '#{composite_svc}' composite cluster because #{entry['hostname']} defines a different '#{COMPOSITE_CLUSTER_MASTER}' than other hosts."
+        end
+      end
+    end
+  end
+  
+  def generate_connector_services_map(map, entry)
+    services = entry["tags"][CONNECTOR_CLUSTERS]
+    if services.to_s() == ""
+      services = entry["tags"][CLUSTER_NAME]
+    end
+    if services.to_s() == ""
+      raise MessageError.new "Unable to create the connector on #{entry['hostname']} because it does not have a value for the '#{CONNECTOR_CLUSTERS}' tag."
+    end
+    
+    unless services.is_a?(Array)
+      services = services.split(",")
+    end
+    services.each{
+      |svc|
+      unless map.has_key?(svc)
+        map[svc] = {}
+      end
+      unless map[svc].has_key?("connectors")
+        map[svc]["connectors"] = []
+      end
+      
+      # Add this host to each cluster
+      map[svc]["connectors"] << entry["hostname"]
+    }
+  end
+  
+  def generate_archive_services_map(map, entry)
+    services = entry["tags"][ARCHIVE_CLUSTERS]
+    if services.to_s() == ""
+      raise MessageError.new "Unable to create the replicator on #{entry['hostname']} because it does not have a value for the '#{ARCHIVE_CLUSTERS}' tag."
+    end
+    
+    unless services.is_a?(Array)
+      services = services.split(",")
+    end
+    services.each{
+      |svc|
+      svc_alias = "#{svc}_slave"
+      unless map.has_key?(svc_alias)
+        map[svc_alias] = {}
+      end
+      unless map[svc_alias].has_key?("members")
+        map[svc_alias]["members"] = []
+      end
+      
+      # Initiate the cluster-slave service
+      map[svc_alias]["master-dataservice"] = svc
+      map[svc_alias]["topology"] = "cluster-slave"
+      
+      # Add this host to the list of servers that is 
+      # replicating from the cluster
+      map[svc_alias]["members"] << entry["hostname"]
+    }
+  end
+  
+  # Remove any services that aren't required for the given entry
+  # Create an INI file that is full sorted and optimized for the host
+  def write_ini_configuration(map, entry)
+    # Filter the services down to the services that are needed to configure 
+    # this server
+    allowed_services = []
+    # - Services it is a member or connector of
+    unless entry["tags"][CLUSTER_NAME].to_s() == ""
+      allowed_services << entry["tags"][CLUSTER_NAME].to_s()
+    end
+    services = entry["tags"][CONNECTOR_CLUSTERS]
+    unless services.to_s() == ""
+      unless services.is_a?(Array)
+        services = services.split(",")
+      end
+      services.each{
+        |svc|
+        allowed_services << svc
+      }
+    end
+    # - Services that are part of its composite cluster
+    unless entry["tags"][COMPOSITE_CLUSTER_NAME].to_s() == ""
+      allowed_services << entry["tags"][COMPOSITE_CLUSTER_NAME].to_s()
+      allowed_services = allowed_services + 
+        services[entry["tags"][COMPOSITE_CLUSTER_NAME].to_s()]["composite-datasources"]
+    end
+    # - Services that it replicates from
+    services = entry["tags"][ARCHIVE_CLUSTERS]
+    unless services.to_s() == ""
+      unless services.is_a?(Array)
+        services = services.split(",")
+      end
+      services.each{
+        |svc|
+        allowed_services << svc
+        allowed_services << "#{svc}_slave"
+      }
+    end
+    
+    # Remove any services that aren't needed
+    map.delete_if {
+      |k,v|
+      (allowed_services.include?(k) == false)
+    }
+    
+    ini = Tempfile.new('tmcini')
+    ini.puts("# DO NOT MODIFY BY HAND")
+    ini.puts("# This file is managed by #{script_name()} for #{entry['hostname']}")
+    ini.puts("# Any manual changes to this file will disable script execution")
+    
+    @defaults_files.sort().each{
+      |path|
+      File.open(path, "r").each{
+        |line|
+        ini.puts(line.chomp())
+      }
+    }
+    
+    # Output each of the services with the keys sorted so they 
+    # come out in a consistent order
+    map.keys().sort().each{
+      |svc|
+      ini.puts("")
+      ini.puts("[#{svc}]")
+      
+      # The cluster-slave topology just needs to know about itself
+      # Including other entries may cause extra replicator restarts
+      if map[svc]["topology"] == "cluster-slave"
+        map[svc]["members"].delete_if{|v| v != entry["hostname"]}
+      end
+      
+      # Print all configuration values in a sorted order
+      map[svc].keys().sort().each{
+        |key|
+        value = map[svc][key]
+        if value.is_a?(Array)
+          value = value.uniq().sort().join(",")
+        end
+        
+        ini.puts("#{key}=#{value}")
+      }
+    }
+    
+    return ini
+  end
+  
+  def configure
+    super()
+    
+    require_installed_directory?(false)
+    
+    add_option(:defaults, {
+      :on => "--defaults String",
+      :help => "Path to file containing the default sections of the tungsten.ini file",
+      :default => "/etc/tungsten/defaults.tungsten.ini"
+    })
+    
+    add_option(:outputfile, {
+      :on => "--output-file String",
+      :help => "Path to file containing the default sections of the tungsten.ini file",
+      :default => "/etc/tungsten/tungsten.ini"
+    })
+    
+    add_option(:hostname, {
+      :on => "--hostname String",
+      :help => "Write the INI file for this hostname",
+      :default => TU.hostname()
+    })
+  end
+  
+  def validate
+    super()
+    
+    unless TU.is_valid?()
+      return TU.is_valid?()
+    end
+    
+    @defaults_files = []    
+    Dir.glob(opt(:defaults)).each{
+      |f|
+      @defaults_files << f
+    }
+    
+    if @defaults_files.size() == 0
+      TU.error("Unable to find any defaults files at #{opt(:defaults)}")
+    end
+    
+    # Make sure that the tungsten.ini file is managed if it exists
+    if File.exists?(opt(:outputfile))
+      matched_lines = TU.cmd_result("grep #{script_name()} /etc/tungsten/tungsten.ini | wc -l")
+      if matched_lines == "0"
+        TU.error("Unable to manage #{opt(:outputfile)} because it already exists and was not created by #{script_name()}")
+      else
+        # If it doesn't match .tungsten.ini.orig then changes have been made
+        original_file = File.dirname(opt(:outputfile)) + "/." + File.basename(opt(:outputfile)) + ".orig"
+        opt(:originalfile, original_file)
+        
+        if File.exists?(original_file)
+          begin
+            file_differences = TU.cmd_result("diff -u #{original_file} #{opt(:outputfile)}")
+            # No differences
+          rescue CommandError => ce
+            if ce.rc == 1
+              TU.error("Unable to manage #{opt(:outputfile)} because changes to it have been made manually")
+            else
+              raise ce
+            end
+          end
+        else
+          TU.error("Unable to manage #{opt(:outputfile)} because the tracking version #{original_file} is no longer available")
+        end
+      end
+    end
+  end
+  
+  def script_name
+    "tungsten_manage_configuration"
+  end
+  
+  self.new().run()
+end
