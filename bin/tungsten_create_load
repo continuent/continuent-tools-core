@@ -54,7 +54,16 @@ class ContinuentCreateLoad
     # generation thread.
     load_threads.peach{
       |load_thread|
-      TU.cmd(get_mysql_command() + " -h#{load_thread[:host]}", true, method(:create_schema_load), nil, method(:forward_mysql_errors))
+      while (ContinuentCreateLoad.interrupted?() == false)
+        begin
+          TU.cmd(get_mysql_command() + " -h#{load_thread[:host]}", true, method(:create_schema_load), nil, method(:forward_mysql_errors))
+        rescue => e
+          TU.debug(e)
+        end
+        if ContinuentCreateLoad.interrupted?() == false
+          TU.notice("Reconnecting to the closed MySQL connection.")
+        end
+      end
     }
     
     puts("\n")
@@ -87,6 +96,7 @@ class ContinuentCreateLoad
       $stdout.flush()
       sleep opt(:sleep).to_i()
     end
+    stdin.puts("exit")
   end
   
   def forward_mysql_errors(msg)
@@ -136,7 +146,7 @@ class ContinuentCreateLoad
       return TU.is_valid?()
     end
     
-    if opt(:use_connector) == nil
+    if opt(:use_connector) == nil || opt(:use_connector) == true
       if TI.is_connector?()
         opt(:use_connector, true)
         
@@ -170,7 +180,6 @@ class ContinuentCreateLoad
         |h|
         (h == TI.hostname())
       }
-      hosts << TI.hostname()
       opt(:hosts, hosts)
     else
       opt(:hosts, [TI.hostname()])
