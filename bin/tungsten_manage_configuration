@@ -18,7 +18,8 @@
 
 # TODO : Add hooks
 # TODO : Think about rollback after copying in the new INI file
-# TODO : Print last run status and summary
+# TODO : Add a mechanism to include service specific configuration information
+# TODO : Add a 'repair' command that will reprovision or change the slave URI
 
 begin
   require 'rubygems'
@@ -88,19 +89,23 @@ class TungstenManageConfiguration
 
     types = entry["tags"][SERVER_TYPE]
     if initial_md5sum != pending_md5sum || opt(:replace_release) == true
+      if opt(:log) != nil
+        TU.set_log_path(opt(:log))
+      end
+      
       TU.info("Update the INI file and system configuration")
       FileUtils.cp(pending_ini.path(), opt(:outputfile))
       FileUtils.cp(pending_ini.path(), get_original_file(opt(:outputfile)))
       
       if types.include?("datasource") || types.include?("connector")
         home = opt(:continuent_tungsten_home)
-        TU.mkdir_if_absent("#{home}/share")
-        tpmlog = "#{home}/share/#{script_name()}.log"
+        TU.mkdir_if_absent("#{home}/service_logs")
+        tpmlog = "#{home}/service_logs/tungsten-configure.log"
         
         if File.exists?("#{home}/tungsten")
           exists = true
           begin
-            TU.info("Update #{home}/tungsten")
+            TU.notice("Update #{home}/tungsten")
             TU.cmd_result("#{opt(:continuent_tungsten_home)}/tungsten/tools/tpm update --tty --log=#{tpmlog}")
           rescue CommandError => ce
             TU.debug(ce)
@@ -110,33 +115,70 @@ class TungstenManageConfiguration
           exists = false
           
           begin
-            TU.info("Install #{opt(:continuent_tungsten_package)}")
+            TU.notice("Install #{opt(:continuent_tungsten_package)}")
             TU.cmd_result("#{opt(:continuent_tungsten_package)}/tools/tpm install --tty --log=#{tpmlog}")
           rescue CommandError => ce
             TU.debug(ce)
             raise "Unable to install Continuent Tungsten check #{tpmlog} for more information"
           end
           
+          install = TungstenInstall.new("#{home}/tungsten")
           if types.include?("datasource")
-            # TODO: Determine role for the replicator
-            # TODO: Provision the replicator if needed
-            # TODO: Identify missing datasources and remove them from the cluster
+            begin
+              available_replicators = JSON.parse(TU.cmd_result("#{home}/tungsten/tungsten-replicator/scripts/multi_trepctl --paths=self --output=json --fields=*"))
+            rescue CommandError => ce
+              TU.debug(ce)
+              raise "Unable to find other replicators running in this cluster. Try running `#{script_name()} repair`."
+            end
+            
+            if available_replicators.size() > 0
+              master_uri = nil
+              relay_uri = nil
+              available_replicators.each{
+                |r|
+                if r["role"] == "master"
+                  master_uri = r["masterListenUri"]
+                elsif r["role"] == "relay"
+                  relay_uri = r["masterListenUri"]
+                end
+              }
+              
+              if master_uri == nil && relay_uri != nil
+                master_uri = relay_uri
+              end
+              
+              dynamic_path = install.setting(install.setting_key(REPL_SERVICES, entry["tags"][CLUSTER_NAME], 'repl_svc_dynamic_config'))
+              if dynamic_path.to_s() == ""
+                raise "Unable to set the replication URI because the dynamic properties file could not be found. Try running `#{script_name()} repair`."
+              end
+              File.open(dynamic_path, "w") {
+                |f|
+                f.puts("replicator.master.connect.uri=#{master_uri}")
+                f.puts("replicator.role=slave")
+              }
+
+              TU.notice("Provisioning the server. This may take some time.")
+              TU.cmd_result("#{home}/tungsten/tungsten-replicator/scripts/tungsten_provision_slave --source=autodetect")
+            end
           end
         end
         
-        TU.info("Start Continuent Tungsten")
-        TU.cmd_result("#{home}/cluster-home/bin/startall")
+        TU.notice("Start Continuent Tungsten")
+        TU.cmd_result("#{home}/tungsten/cluster-home/bin/startall")
+        # TODO: Check that everything has started
+        
+        # TODO: Identify missing datasources and remove them from the cluster
       end
       
       if types.include?("archive")
         home = opt(:tungsten_replicator_home)
-        TU.mkdir_if_absent("#{home}/share")
-        tpmlog = "#{home}/share/#{script_name()}.log"
+        TU.mkdir_if_absent("#{home}/service_logs")
+        tpmlog = "#{home}/service_logs/tungsten-configure.log"
         
         if File.exists?("#{home}/tungsten")
           exists = true
           begin
-            TU.info("Update #{home}/tungsten")
+            TU.notice("Update #{home}/tungsten")
             TU.cmd_result("#{opt(:tungsten_replicator_home)}/tungsten/tools/tpm update --tty --log=#{tpmlog}")
           rescue CommandError => ce
             TU.debug(ce)
@@ -146,19 +188,21 @@ class TungstenManageConfiguration
           exists = false
           
           begin
-            TU.info("Install #{opt(:tungsten_replicator_package)}")
+            TU.notice("Install #{opt(:tungsten_replicator_package)}")
             TU.cmd_result("#{opt(:tungsten_replicator_package)}/tools/tpm install --tty --log=#{tpmlog}")
           rescue CommandError => ce
             TU.debug(ce)
             raise "Unable to install Tungsten Replicator check #{tpmlog} for more information"
           end
           
-          TU.info("Start Tungsten Replicator")
-          TU.cmd_result("#{home}/cluster-home/bin/startall")
+          # TODO: Provision the server if it isn't a datasource
+          
+          TU.notice("Start Tungsten Replicator")
+          TU.cmd_result("#{home}/tungsten/cluster-home/bin/startall")
         end
       end
     else
-      TU.info("There are no changes to the INI file")
+      TU.notice("There are no changes to the INI file")
     end
     
     if types.include?("connector")
@@ -167,25 +211,29 @@ class TungstenManageConfiguration
   end
   
   def uninstall_entry(entry)
+    if opt(:log) != nil
+      TU.set_log_path(opt(:log))
+    end
+    
     types = entry["tags"][SERVER_TYPE]
     
     if types.include?("datasource") || types.include?("connector")
       begin
-        TU.info("Uninstall #{opt(:continuent_tungsten_package)}")
+        TU.notice("Uninstall #{opt(:continuent_tungsten_package)}")
         TU.cmd_result("#{opt(:continuent_tungsten_package)}/tools/tpm uninstall --i-am-sure")
       rescue CommandError => ce
         TU.debug(ce)
-        raise "Unable to uninstall Continuent Tungsten"
+        TU.error "Unable to uninstall Continuent Tungsten"
       end
     end
     
     if types.include?("archive")
       begin
-        TU.info("Uninstall #{opt(:tungsten_replicator_package)}")
+        TU.notice("Uninstall #{opt(:tungsten_replicator_package)}")
         TU.cmd_result("#{opt(:tungsten_replicator_package)}/tools/tpm uninstall --i-am-sure")
       rescue CommandError => ce
         TU.debug(ce)
-        raise "Unable to uninstall Tungsten Replicator"
+        TU.error "Unable to uninstall Tungsten Replicator"
       end
     end
     
@@ -516,6 +564,16 @@ class TungstenManageConfiguration
       :help => "Force the script to run tpm update or install even if there are no changes to the INI file",
     })
     
+    add_option(:log, {
+      :on => "--log String",
+      :help => "Log debug output to this file for every run that modifies system configuration",
+    })
+    
+    add_option(:lastrun, {
+      :on => "--lastrun String",
+      :help => "A file to store the exit code for the last run of this script",
+    })
+    
     add_command(:install, {
       :help => "Write the INI configuration file and install/update software",
       :default => true
@@ -641,6 +699,21 @@ class TungstenManageConfiguration
         TU.error("Unable to manage #{opt(:hostname)} because it includes the 'archive' #{SERVER_TYPE} tag but the INI defaults do not include a value for 'rmi-port' under '[defaults.replicator]'.")
       end
     end
+  end
+  
+  def cleanup(code = 0)
+    if opt(:lastrun) != nil
+      begin
+        File.open(opt(:lastrun), "w") {
+          |f|
+          f.puts(code)
+        }
+      rescue => e
+        TU.exception(e)
+      end
+    end
+    
+    super(code)
   end
   
   def get_original_file(file)
