@@ -1,9 +1,36 @@
 continuent-tools-core
 =====================
 
-The continuent-tools-core is a package of libraries that are found in Tungsten Replicator. When the gem is built, these files are automatically exported from [https://code.google.com/p/tungsten-replicator/](https://code.google.com/p/tungsten-replicator/).
+The continuent-tools-core is a package of libraries and scripts to use with most Continuent Tungsten deployments. It is the basis for all other RubyGems distributed by Continuent.
+
+The code is focused around the 'TungstenScript' Ruby class that is found in Tungsten Replicator. When the gem is built, these files are automatically exported from [https://code.google.com/p/tungsten-replicator/](https://code.google.com/p/tungsten-replicator/).
+
+Installation may be done using the 'gem' utility. This will ensure that all prerequisites are installed.
 
     gem install continuent-tools-core
+    
+Using the tungsten\_create\_load script
+===
+
+The tungsten\_create\_load script may be used to apply load directly to a MySQL server or through a Tungsten Connector. By default, the script will read your configuration and use the Tungsten Connector if it is available. This may be disabled by adding '--use-connector=false'.
+
+Using the Continuent Tungsten management scripts
+===
+
+Integration with Puppet
+---
+
+Integration with Chef
+---
+
+Integration with AWS CloudFormation
+---
+
+Integration with AWS EC2
+---
+
+Using the TungstenScript class
+===
 
 Script Structure
 ---

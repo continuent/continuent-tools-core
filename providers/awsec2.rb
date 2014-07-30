@@ -16,12 +16,12 @@ class AWSEC2TungstenDirectoryProvider < TungstenDirectoryProvider
     
     if aws_info.has_key?("access_key_id")
       AWS.config({
-        :access_key_id => Facter.value('aws_access_key')
+        :access_key_id => aws_info["access_key_id"]
       })
     end
-    if aws_info.has_key?("aws_secret_access_key")
+    if aws_info.has_key?("secret_access_key")
       AWS.config({
-        :secret_access_key => Facter.value('aws_secret_access_key')
+        :secret_access_key => aws_info["secret_access_key"]
       })
     end
     ec2 = AWS::EC2.new()
@@ -54,9 +54,15 @@ class AWSEC2TungstenDirectoryProvider < TungstenDirectoryProvider
           
           tags = ins.tags.to_h()
           
+          name = tags.to_h()["Name"]
+          if name.to_s() == ""
+            TU.error("Unable to identify the hostname for #{ins.id} in #{region}")
+          end
+          
           TU.debug("Found #{ins.id}")
-          region_results[index][ins.id] = {
-            'hostname' => tags.to_h()["Name"],
+          region_results[index][name] = {
+            'id' => ins.id.to_s(),
+            'hostname' => name,
             'location' => ins.availability_zone,
             'public-address' => ins.public_ip_address,
             'private-address' => ins.private_ip_address,

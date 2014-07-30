@@ -16,6 +16,8 @@
 # Initial developer(s): Jeff Mace
 # Contributor(s):
 
+# TODO : Add commands to output host definitions in Puppet or Chef form
+
 begin
   require 'rubygems'
   gem 'continuent-tools-core'
@@ -64,6 +66,19 @@ class TungstenDirectory
   private
   
   def main
+    directory_entries = collect_directory_entries()
+    
+    unless TU.is_valid?
+      return
+    end
+    
+    case command()
+    when "list"
+      TU.output(JSON.pretty_generate(directory_entries))
+    end
+  end
+  
+  def collect_directory_entries
     found_files = false
     directory_entries = {}
     
@@ -91,15 +106,22 @@ class TungstenDirectory
             TU.error("Unable to autodetect #{matches[1]} entries")
           end
         else
+          entry = parse_directory_entry(v)
+          hostname = k
+          if entry.has_key?("hostname")
+            hostname = entry["hostname"]
+          else
+            entry["hostname"] = hostname
+          end
+          
           # Build a manual entry and add it to the list
-          directory_entries[k] = parse_directory_entry(v)
+          directory_entries[k] = entry
         end
       }
     }
     
     if found_files == false
-      TU.error("Unable to find any files at #{opt(:config)}")
-      return
+      raise "Unable to find any files at #{opt(:config)}"
     end
     
     # Modify each directory entry and prepare it for output
@@ -109,6 +131,15 @@ class TungstenDirectory
         next
       end
       
+      unless entry["hostname"] != ""
+        TU.error("Entry '#{entry["id"]}' does not include a hostname")
+      end
+      
+      unless entry["location"] != ""
+        TU.error("Entry '#{entry["id"]}' does not include a location")
+      end
+      
+      entry["id"] = id
       entry["tags"].each{
         |k,v|
         v = v.split(",")
@@ -118,9 +149,7 @@ class TungstenDirectory
       }
     }
     
-    if TU.is_valid?
-      TU.output(JSON.pretty_generate(directory_entries))
-    end
+    return directory_entries
   end
   
   def parse_directory_entry(e)
@@ -157,6 +186,11 @@ class TungstenDirectory
       :on => "--config String",
       :help => "Path to INI file that holds directory information",
       :default => "/etc/tungsten/directory.ini"
+    })
+    
+    add_command(:list, {
+      :help => "Output the directory information as JSON",
+      :default => true
     })
   end
   
