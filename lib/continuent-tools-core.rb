@@ -140,17 +140,6 @@ module TungstenScript
   
   def validate
     orig_validate()
-    
-    @option_definitions.each{
-      |option_key,definition|
-      
-      if definition[:required] == true
-        if opt(option_key).to_s() == ""
-          arg = definition[:on][0].split(" ")[0]
-          TU.error("Missing value for the #{arg} option")
-        end
-      end
-    }
   end
 end
 

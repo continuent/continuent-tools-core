@@ -162,14 +162,17 @@ class ContinuentCreateLoad
         defaults_file.puts("password=#{TI.setting(TI.setting_key(CONNECTORS, "connector_password"))}")
         defaults_file.flush()
         
-        opt(:mysqlport, TI.setting(TI.setting_key(CONNECTORS, "connector_listen_port")))
         opt(:mysqlhost, TI.hostname())
+        opt(:mysqlport, TI.setting(TI.setting_key(CONNECTORS, "connector_listen_port")))
       elsif TI.is_replicator?()
         opt(:use_connector, false)
         
         if TI.setting(TI.setting_key(REPL_SERVICES, @options[:service], "repl_datasource_type")) != "mysql"
           TU.error("Unable to create load on this system because it is not configured for MySQL")
         end
+        
+        opt(:mysqlhost, TI.setting(TI.setting_key(REPL_SERVICES, opt(:service), "repl_direct_datasource_host")))
+        opt(:mysqlport, TI.setting(TI.setting_key(REPL_SERVICES, opt(:service), "repl_direct_datasource_port")))
       else
         TU.error("Unable to create load on this system because it is not configured as a Tungsten Connector or Tungsten Replicator")
       end
@@ -182,7 +185,7 @@ class ContinuentCreateLoad
       }
       opt(:hosts, hosts)
     else
-      opt(:hosts, [TI.hostname()])
+      opt(:hosts, [opt(:mysqlhost)])
     end
   end
   

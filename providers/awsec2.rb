@@ -46,12 +46,19 @@ class AWSEC2TungstenDirectoryProvider < TungstenDirectoryProvider
         TU.debug("Collect ec2_hosts from #{region}")
         
         region_ec2 = AWS::EC2.new(:region => region)
-        region_ec2.instances().tagged('tungsten-ServerType').each{
-          |ins|
-          unless ins.status == :running
-            next
+        instances = region_ec2.instances().filter('instance-state-name', "running")
+
+        if aws_info.has_key?("tag_key")
+          if aws_info.has_key?("tag_value")
+            instances = instances.with_tag(aws_info["tag_key"], aws_info["tag_value"])
+          else
+            instances = instances.tagged(aws_info["tag_key"])
           end
-          
+        else
+          instances = instances.tagged('tungsten-ServerType')
+        end
+        instances.each{
+          |ins|
           tags = ins.tags.to_h()
           
           name = tags.to_h()["Name"]
@@ -59,11 +66,18 @@ class AWSEC2TungstenDirectoryProvider < TungstenDirectoryProvider
             TU.error("Unable to identify the hostname for #{ins.id} in #{region}")
           end
           
+          
+          if ins.vpc_id != nil
+            location = ins.availability_zone + "." + ins.vpc_id
+          else
+            location = ins.availability_zone
+          end
+          
           TU.debug("Found #{ins.id}")
           region_results[index][name] = {
             'id' => ins.id.to_s(),
             'hostname' => name,
-            'location' => ins.availability_zone,
+            'location' => location,
             'public-address' => ins.public_ip_address,
             'private-address' => ins.private_ip_address,
             'tags' => tags.to_h(),

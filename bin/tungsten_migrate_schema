@@ -1,0 +1,107 @@
+#!/usr/bin/env ruby
+# Copyright (C) 2014 Continuent, Inc.
+# 
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License.  You may obtain
+# a copy of the License at
+# 
+#         http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+# License for the specific language governing permissions and limitations
+# under the License.
+#
+# Initial developer(s): Jeff Mace
+# Contributor(s):
+
+begin
+  require 'rubygems'
+  gem 'continuent-tools-core'
+rescue LoadError
+end
+
+require 'continuent-tools-core'
+require 'tempfile'
+
+class TungstenMigrateSchema
+  include TungstenScript
+  include MySQLServiceScript
+  include OfflineSingleServiceScript
+  private
+  
+  def main
+    f = Tempfile.new("#{script_name()}")
+    
+    TU.debug("Create mysqldump in #{f.path()}")
+    if opt(:log_updates) == false
+      TU.cmd_result("echo \"SET SESSION SQL_LOG_BIN=0;\n\" >> #{f.path()}")
+    end
+    TU.cmd_result("echo \"CREATE SCHEMA \\`#{opt(:to)}\\`;\n\" >> #{f.path()}")
+    TU.cmd_result("echo \"USE '#{opt(:to)}';\n\" >> #{f.path()}")
+    TU.cmd_result("#{get_mysqldump_command(opt(:from))} >> #{f.path()}")
+    
+    if opt(:drop_original_schema) == true
+      TU.cmd_result("echo \"DROP SCHEMA \\`#{opt(:from)}\\`;\n\" >> #{f.path()}")
+    end
+    
+    TU.cmd_result("cat #{f.path()} | #{get_mysql_command()}")
+  end
+  
+  def get_mysqldump_command(schema)
+    "mysqldump --defaults-file=#{@options[:my_cnf]} --host=#{@options[:mysqlhost]} --port=#{@options[:mysqlport]} --opt --single-transaction #{schema}"
+  end
+  
+  def configure
+    super()
+    
+    add_option(:from, {
+      :on => "--from-schema String",
+      :help => "The existing schema name to use",
+      :required => true,
+    })
+    
+    add_option(:to, {
+      :on => "--to-schema String",
+      :help => "The schema name to create",
+      :required => true,
+    })
+    
+    add_option(:log_updates, {
+      :on => "--log-updates String",
+      :parse => method(:parse_boolean_option),
+      :default => false,
+      :help => "Force the script to log updates to the database",
+    })
+    
+    add_option(:drop_original_schema, {
+      :on => "--drop-original-schema String",
+      :parse => method(:parse_boolean_option),
+      :default => false,
+      :help => "Drop the schema identified by --from-schema",
+    })
+  end
+  
+  def validate
+    super()
+    
+    unless TU.is_valid?()
+      return TU.is_valid?()
+    end
+    
+    if get_mysql_result("SHOW SCHEMAS LIKE '#{opt(:from)}'") == ""
+      TU.error("Unable to find an existing '#{opt(:from)}' schema")
+    end
+    
+    if get_mysql_result("SHOW SCHEMAS LIKE '#{opt(:to)}'") != ""
+      TU.error("There is already an existing '#{opt(:to)}' schema")
+    end
+  end
+  
+  def script_name
+    "tungsten_migrate_schema"
+  end
+  
+  self.new().run()
+end

@@ -16,7 +16,7 @@
 # Initial developer(s): Jeff Mace
 # Contributor(s):
 
-# TODO : Add commands to output host definitions in Puppet or Chef form
+# TODO : Add commands to output host definitions in Chef form
 
 begin
   require 'rubygems'
@@ -75,6 +75,28 @@ class TungstenDirectory
     case command()
     when "list"
       TU.output(JSON.pretty_generate(directory_entries))
+    when "hosts"
+      if directory_entries.has_key?(opt(:hostname))
+        location = directory_entries[opt(:hostname)]["location"]
+      else
+        location = nil
+      end
+      hostsmap = generate_hosts_map(directory_entries, location)
+      hostsmap.keys().sort().each{
+        |h|
+        TU.output("#{hostsmap[h]}\t#{h}")
+      }
+    when "hosts_puppet_manifest"
+      if directory_entries.has_key?(opt(:hostname))
+        location = directory_entries[opt(:hostname)]["location"]
+      else
+        location = nil
+      end
+      hostsmap = generate_hosts_map(directory_entries, location)
+      hostsmap.keys().sort().each{
+        |h|
+        TU.output("host { '#{h}' : ip => '#{hostsmap[h]}', comment => 'Created by #{script_name()}'}")
+      }
     end
   end
   
@@ -177,6 +199,34 @@ class TungstenDirectory
     return entry
   end
   
+  # For each entry include the private address if the host location
+  # matches the given location. Use the public address if there is no private
+  # address or the locations do not match.
+  def generate_hosts_map(directory_entries, location = nil)
+    hosts_map = {}
+    
+    directory_entries.each{
+      |hostname,entry|
+      if location != nil && entry["location"] == location
+        if entry.has_key?("private-address")
+          hosts_map[hostname] = entry["private-address"]
+        elsif entry.has_key?("public-address")
+          hosts_map[hostname] = entry["public-address"]
+        else
+          TU.error("Unable to find a private or public address for #{hostname}")
+        end
+      else
+        if entry.has_key?("public-address")
+          hosts_map[hostname] = entry["public-address"]
+        else
+          TU.error("Unable to find a public address for #{hostname}")
+        end
+      end
+    }
+    
+    return hosts_map
+  end
+  
   def configure
     super()
     
@@ -188,9 +238,23 @@ class TungstenDirectory
       :default => "/etc/tungsten/directory.ini"
     })
     
+    add_option(:hostname, {
+      :on => "--hostname String",
+      :help => "Use this hostname for calculating hosts entries",
+      :default => TU.hostname()
+    })
+    
     add_command(:list, {
       :help => "Output the directory information as JSON",
       :default => true
+    })
+    
+    add_command(:hosts, {
+      :help => "Output /etc/hosts entries for the directory hosts"
+    })
+    
+    add_command(:hosts_puppet_manifest, {
+      :help => "Output a Puppet manifest for the directory hosts"
     })
   end
   
