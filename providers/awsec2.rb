@@ -25,6 +25,12 @@ class AWSEC2TungstenDirectoryProvider < TungstenDirectoryProvider
       })
     end
     ec2 = AWS::EC2.new()
+    
+    if aws_info.has_key?("hostname_tag")
+      hostname_tag = aws_info["hostname_tag"]
+    else
+      hostname_tag = "Name"
+    end
 
     region_index = -1
     region_threads = []
@@ -61,7 +67,7 @@ class AWSEC2TungstenDirectoryProvider < TungstenDirectoryProvider
           |ins|
           tags = ins.tags.to_h()
           
-          name = tags.to_h()["Name"]
+          name = tags.to_h()[hostname_tag]
           if name.to_s() == ""
             TU.error("Unable to identify the hostname for #{ins.id} in #{region}")
           end

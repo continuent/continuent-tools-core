@@ -165,7 +165,7 @@ class TungstenManageConfiguration
       target_schema = nil
       
       begin
-        if entry["tags"][COMPOSITE_CLUSTER_NAME] != ""
+        if entry["tags"][COMPOSITE_CLUSTER_NAME].to_s() != ""
           # Check if the service is currently writing to the composite service schema
           current_schema = install.setting(install.setting_key(REPL_SERVICES, entry["tags"][CLUSTER_NAME], "repl_svc_schema"))
           target_schema = "tungsten_#{TU.to_identifier(entry["tags"][COMPOSITE_CLUSTER_NAME])}"
