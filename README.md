@@ -14,20 +14,14 @@ Using the tungsten\_create\_load script
 
 The tungsten\_create\_load script may be used to apply load directly to a MySQL server or through a Tungsten Connector. By default, the script will read your configuration and use the Tungsten Connector if it is available. This may be disabled by adding '--use-connector=false'.
 
-Using the Continuent Tungsten management scripts
+Automated Continuent Tungsten management scripts
 ===
 
-Integration with Puppet
----
+The automated Continuent Tungsten management scripts are designed to be used as a way to manage Continuent Tungsten host configurations. They use provided or discovered directory information to determine the configuration of the local host and install or update the necessary components.
 
-Integration with Chef
----
+These tools can be called using CRON, Puppet, Chef or other devops tools with little customization to the specific platform.
 
-Integration with AWS CloudFormation
----
-
-Integration with AWS EC2
----
+See [MANAGE\_CONFIGURATION.md](MANAGE\_CONFIGURATION.md) for more details.
 
 Using the TungstenScript class
 ===

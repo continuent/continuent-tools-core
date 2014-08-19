@@ -181,49 +181,10 @@ class TungstenManageConfiguration
       current_schema = nil
       target_schema = nil
       
-      begin
-        if entry["tags"][COMPOSITE_CLUSTER_NAME].to_s() != ""
-          # Check if the service is currently writing to the composite service schema
-          current_schema = install.setting(install.setting_key(REPL_SERVICES, entry["tags"][CLUSTER_NAME], "repl_svc_schema"))
-          target_schema = "tungsten_#{TU.to_identifier(entry["tags"][COMPOSITE_CLUSTER_NAME])}"
-          
-          if current_schema != target_schema
-            TU.notice("Migrate the #{current_schema} schema to #{target_schema}")
-            migrate_schema = true
-            
-            # Shutdown the replicator while we migrate the schema and then 
-            # upgrade Continuent Tungsten. It needs to be stopped instead of
-            # put OFFLINE so the manager does not put it ONLINE.
-            TU.cmd_result("#{home}/tungsten/tungsten-replicator/bin/replicator stop")
-            TU.tungsten_cmd_result("tungsten_migrate_schema --from-schema=#{current_schema} --to-schema=#{target_schema}")
-          end
-        end
-      rescue CommandError => ce
-        TU.debug(ce)
-        
-        # Make sure the replicator is restarted if we are cancelling the script
-        TU.cmd_result("#{home}/tungsten/tungsten-replicator/bin/replicator start")
-        
-        raise "Unable to update Continuent Tungsten to a composite cluster because of issues migrating the tracking schema."
-      end
-
-      begin
-        if migrate_schema == true
-          TU.notice("Update #{home}/tungsten and migrate to a composite cluster")
-          TU.cmd_result("#{opt(:continuent_tungsten_package)}/tools/tpm update --replace-release --tty --log=#{tpmlog}")
-        else
-          TU.notice("Update #{home}/tungsten")
-          TU.cmd_result("#{opt(:continuent_tungsten_home)}/tungsten/tools/tpm update --tty --log=#{tpmlog}")
-        end
-      rescue CommandError => ce
-        TU.debug(ce)
-        raise "Unable to update Continuent Tungsten check #{tpmlog} for more information"
-      ensure
-        if migrate_schema == true
-          # Restart the replicator after shutting it down for the schema migration
-          TU.cmd_result("#{home}/tungsten/tungsten-replicator/bin/replicator start")
-        end
-      end
+      new_clusters = nil
+      new_members = nil
+      removed_clusters = nil
+      removed_members = nil
       
       if entry_is_type?(entry, "datasource")
         # Calculate new or removed members and clusters so we can take
@@ -254,6 +215,56 @@ class TungstenManageConfiguration
             end
             TU.debug("Removed #{svc} members: #{members.join(',')}")
           }
+        end
+      end
+      
+      begin
+        if entry["tags"][COMPOSITE_CLUSTER_NAME].to_s() != ""
+          # Check if the service is currently writing to the composite service schema
+          current_schema = install.setting(install.setting_key(REPL_SERVICES, entry["tags"][CLUSTER_NAME], "repl_svc_schema"))
+          target_schema = "tungsten_#{TU.to_identifier(entry["tags"][COMPOSITE_CLUSTER_NAME])}"
+          
+          if current_schema != target_schema
+            TU.notice("Migrate the #{current_schema} schema to #{target_schema}")
+            migrate_schema = true
+            
+            # Shutdown the replicator while we migrate the schema and then 
+            # upgrade Continuent Tungsten. It needs to be stopped instead of
+            # put OFFLINE so the manager does not put it ONLINE.
+            TU.cmd_result("#{home}/tungsten/tungsten-replicator/bin/replicator stop")
+            TU.tungsten_cmd_result("tungsten_migrate_schema --from-schema=#{current_schema} --to-schema=#{target_schema} --drop-target-schema=true")
+          end
+        end
+      rescue CommandError => ce
+        TU.debug(ce)
+        
+        # Make sure the replicator is restarted if we are cancelling the script
+        TU.cmd_result("#{home}/tungsten/tungsten-replicator/bin/replicator start")
+        
+        raise "Unable to update Continuent Tungsten to a composite cluster because of issues migrating the tracking schema."
+      end
+
+      begin
+        replace_release = false
+        if migrate_schema == true
+          TU.debug("Force `tpm update --replace-release` due to a new composite cluster")
+          replace_release = true
+        end
+        
+        if replace_release == true
+          TU.notice("Update #{home}/tungsten and replace release directory")
+          TU.cmd_result("#{opt(:continuent_tungsten_package)}/tools/tpm update --replace-release --tty --log=#{tpmlog}")
+        else
+          TU.notice("Update #{home}/tungsten")
+          TU.cmd_result("#{opt(:continuent_tungsten_home)}/tungsten/tools/tpm update --tty --log=#{tpmlog}")
+        end
+      rescue CommandError => ce
+        TU.debug(ce)
+        raise "Unable to update Continuent Tungsten check #{tpmlog} for more information"
+      ensure
+        if migrate_schema == true
+          # Restart the replicator after shutting it down for the schema migration
+          TU.cmd_result("#{home}/tungsten/tungsten-replicator/bin/replicator start")
         end
       end
     else
@@ -1360,6 +1371,14 @@ class TungstenManageConfiguration
         TU.set_log_path(opt(:log))
       end
       @script_log_enabled = true
+    end
+  end
+  
+  def script_log_path
+    if @script_log_enabled == true
+      opt(:log)
+    else
+      super()
     end
   end
   

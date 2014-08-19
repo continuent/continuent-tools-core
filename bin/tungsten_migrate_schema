@@ -38,11 +38,16 @@ class TungstenMigrateSchema
     if opt(:log_updates) == false
       TU.cmd_result("echo \"SET SESSION SQL_LOG_BIN=0;\n\" >> #{f.path()}")
     end
+    
+    if opt(:drop_original_schema) == true
+      TU.cmd_result("echo \"DROP SCHEMA IF EXISTS \\`#{opt(:to)}\\`;\n\" >> #{f.path()}")
+    end
+    
     TU.cmd_result("echo \"CREATE SCHEMA \\`#{opt(:to)}\\`;\n\" >> #{f.path()}")
     TU.cmd_result("echo \"USE '#{opt(:to)}';\n\" >> #{f.path()}")
     TU.cmd_result("#{get_mysqldump_command(opt(:from))} >> #{f.path()}")
     
-    if opt(:drop_original_schema) == true
+    if opt(:drop_target_schema) == true
       TU.cmd_result("echo \"DROP SCHEMA \\`#{opt(:from)}\\`;\n\" >> #{f.path()}")
     end
     
@@ -81,6 +86,13 @@ class TungstenMigrateSchema
       :default => false,
       :help => "Drop the schema identified by --from-schema",
     })
+    
+    add_option(:drop_target_schema, {
+      :on => "--drop-target-schema String",
+      :parse => method(:parse_boolean_option),
+      :default => false,
+      :help => "Drop the schema identified by --to-schema",
+    })
   end
   
   def validate
@@ -90,12 +102,16 @@ class TungstenMigrateSchema
       return TU.is_valid?()
     end
     
-    if get_mysql_result("SHOW SCHEMAS LIKE '#{opt(:from)}'") == ""
-      TU.error("Unable to find an existing '#{opt(:from)}' schema")
+    unless opt(:drop_original_schema) == true
+      if get_mysql_result("SHOW SCHEMAS LIKE '#{opt(:from)}'") == ""
+        TU.error("Unable to find an existing '#{opt(:from)}' schema")
+      end
     end
     
-    if get_mysql_result("SHOW SCHEMAS LIKE '#{opt(:to)}'") != ""
-      TU.error("There is already an existing '#{opt(:to)}' schema")
+    unless opt(:drop_target_schema) == true
+      if get_mysql_result("SHOW SCHEMAS LIKE '#{opt(:to)}'") != ""
+        TU.error("There is already an existing '#{opt(:to)}' schema")
+      end
     end
   end
   
