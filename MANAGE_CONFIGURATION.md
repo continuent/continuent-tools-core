@@ -22,6 +22,8 @@ Prerequisites
 * Each server must be prepared with the prerequisites for Continent Tungsten
 * Install the `continuent-tools-core` Ruby Gem
 
+For now, you will need a special version of the Ruby Gem. Download it from [S3](https://releases.continuent.com.s3.amazonaws.com/continuent-tools-core-0.1.6.gem) and install the downloaded gem file.
+
 Usage
 ===
 
