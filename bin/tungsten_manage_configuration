@@ -17,9 +17,8 @@
 # Contributor(s):
 
 # TODO : Add hooks
-# TODO : Think about rollback after copying in the new INI file
 # TODO : Logical provisioning
-# TODO : Test for change to cluster name or composite cluster name
+# TODO : Removing missing datasources from the cluster
 
 begin
   require 'rubygems'
@@ -115,13 +114,31 @@ class TungstenManageConfiguration
     else
       initial_contents = {}
     end
+    
+    # Check the status of the last time the script was run
+    if opt(:lastrun) != nil && File.exist?(opt(:lastrun))
+      lastrun = File.open(opt(:lastrun), "r").read().chomp()
+    else
+      lastrun = nil
+    end
 
     # returns true if opt(:outputfile) was actually modified
     file_replaced = replace_managed_file(opt(:outputfile), pending_ini)
     
-    # We only need to update the software configuration if there were file
-    # changes or if the user requested it with --replace-release
-    if file_replaced == true || opt(:replace_release) == true
+    # We only need to update the software configuration if 
+    # - there were configuration changes
+    # - if the user requested it with --replace-release
+    # - if the last run was not successful
+    apply_changes = false
+    if file_replaced == true
+      apply_changes = true
+    elsif opt(:replace_release) == true
+      apply_changes = true
+    elsif lastrun != nil && lastrun != "0"
+      apply_changes = true
+    end
+    
+    if apply_changes == true
       enable_script_log()
       
       # If enabled, update /etc/hosts with any available directory entries
@@ -238,8 +255,6 @@ class TungstenManageConfiguration
             TU.debug("Removed #{svc} members: #{members.join(',')}")
           }
         end
-      
-        # TODO: Removing missing datasources from the cluster
       end
     else
       begin
@@ -1167,8 +1182,6 @@ class TungstenManageConfiguration
   
   # Check the server types for this host and validate we have enough information
   def validate_entry(entry)
-    types = entry["tags"][SERVER_TYPE]
-    
     if entry_is_type?(entry, ["datasource", "connector"])
       unless opt(:continuent_tungsten_package) != nil
         TU.error("Unable to manage #{opt(:hostname)} because it includes the 'datasource' or 'connector' #{SERVER_TYPE} tag and no argument was given for --continuent-tungsten-package")
@@ -1183,7 +1196,6 @@ class TungstenManageConfiguration
   end
   
   def validate_pending_ini_contents(entry, pending_contents)
-    types = entry["tags"][SERVER_TYPE]
     ini = Properties.new()
     ini.props = pending_contents
     
@@ -1196,6 +1208,26 @@ class TungstenManageConfiguration
         TU.error("Unable to manage #{opt(:hostname)} because it includes the 'datasource' or 'connector' #{SERVER_TYPE} tag but the INI defaults do not include a value for 'home-directory' under '[defaults]'.")
       else
         opt(:continuent_tungsten_home, continuent_tungsten_home)
+      end
+    end
+    
+    if entry_is_type?(entry, "datasource")
+      if File.exists?("#{opt(:continuent_tungsten_home)}/tungsten")
+        install = TungstenInstall.new("#{opt(:continuent_tungsten_home)}/tungsten")
+        
+        svc = install.setting("deployment_dataservice")
+        composite_svc = install.setting(TI.setting_key("dataservices", svc, "dataservice_parent_dataservice"))
+        
+        pending_svc = entry["tags"][CLUSTER_NAME]
+        pending_composite_svc = entry["tags"][COMPOSITE_CLUSTER_NAME]
+        
+        if svc != pending_svc
+          TU.error("Unable to migrate the cluster name from #{svc} to #{pending_svc}")
+        end
+        
+        if composite_svc.to_s() != "" and composite_svc != pending_composite_svc
+          TU.error("Unable to migrate the composite cluster name from #{composite_svc} to #{pending_composite_svc}")
+        end
       end
     end
     
