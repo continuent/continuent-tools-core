@@ -115,7 +115,7 @@ class TungstenUtil
     original_errors = errors
     rc = status.exitstatus
     if errors == ""
-      errors = "No Errors"
+      errors = "No STDERR"
     else
       errors = "Errors: #{errors}"
     end
