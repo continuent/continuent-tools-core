@@ -16,8 +16,6 @@
 # Initial developer(s): Jeff Mace
 # Contributor(s):
 
-# TODO : Add hooks
-# TODO : Logical provisioning
 # TODO : Removing missing datasources from the cluster
 
 begin
@@ -97,6 +95,8 @@ class TungstenManageConfiguration
   # software packages. Automatically detect the correct master and provision
   # the server if it is a slave.
   def install_entry(services, entry, directory_entries)
+    call_hook(:hook_before_install)
+    
     # Eliminate services not related to the current entry and write to INI
     entry_services = filter_services_map(services, entry)
     pending_ini = write_ini_configuration(entry_services, entry)
@@ -168,12 +168,16 @@ class TungstenManageConfiguration
     if entry_is_type?(entry, "connector")
       update_usersmap(entry, entry_services.keys())
     end
+    
+    call_hook(:hook_after_install)
   end
   
   def update_continuent_tungsten(entry, initial_contents, new_contents)
     home = opt(:continuent_tungsten_home)
     TU.mkdir_if_absent("#{home}/service_logs")
     tpmlog = "#{home}/service_logs/tungsten-configure.log"
+    hook_arguments = []
+    hook_arguments << "--continuent-tungsten-home=#{home}"
     
     if File.exists?("#{home}/tungsten")
       install = TungstenInstall.new("#{home}/tungsten")
@@ -194,9 +198,17 @@ class TungstenManageConfiguration
 
         if new_clusters != nil
           TU.debug("New clusters: #{new_clusters.join(',')}")
+          new_clusters.each{
+            |cluster|
+            hook_arguments << "--add-cluster=#{cluster}"
+          }
         end
         if removed_clusters != nil
           TU.debug("Removed clusters: #{removed_clusters.join(',')}")
+          removed_clusters.each{
+            |cluster|
+            hook_arguments << "--remove-cluster=#{cluster}"
+          }
         end
         if new_members != nil
           new_members.each{
@@ -205,6 +217,10 @@ class TungstenManageConfiguration
               next
             end
             TU.debug("New #{svc} members: #{members.join(',')}")
+            members.each{
+              |member|
+              hook_arguments << "--add-member=#{svc}.#{member}"
+            }
           }
         end
         if removed_members != nil
@@ -214,6 +230,10 @@ class TungstenManageConfiguration
               next
             end
             TU.debug("Removed #{svc} members: #{members.join(',')}")
+            members.each{
+              |member|
+              hook_arguments << "--remove-member=#{svc}.#{member}"
+            }
           }
         end
       end
@@ -251,6 +271,7 @@ class TungstenManageConfiguration
           replace_release = true
         end
         
+        call_hook(:hook_before_ct_update, hook_arguments)
         if replace_release == true
           TU.notice("Update #{home}/tungsten and replace release directory")
           TU.cmd_result("#{opt(:continuent_tungsten_package)}/tools/tpm update --replace-release --tty --log=#{tpmlog}")
@@ -258,6 +279,7 @@ class TungstenManageConfiguration
           TU.notice("Update #{home}/tungsten")
           TU.cmd_result("#{opt(:continuent_tungsten_home)}/tungsten/tools/tpm update --tty --log=#{tpmlog}")
         end
+        call_hook(:hook_after_ct_update, hook_arguments)
       rescue CommandError => ce
         TU.debug(ce)
         raise "Unable to update Continuent Tungsten check #{tpmlog} for more information"
@@ -269,8 +291,10 @@ class TungstenManageConfiguration
       end
     else
       begin
+        call_hook(:hook_before_ct_install, hook_arguments)
         TU.notice("Install #{opt(:continuent_tungsten_package)}")
         TU.cmd_result("#{opt(:continuent_tungsten_package)}/tools/tpm install --tty --log=#{tpmlog}")
+        call_hook(:hook_after_ct_install, hook_arguments)
       rescue CommandError => ce
         TU.debug(ce)
         raise "Unable to install Continuent Tungsten check #{tpmlog} for more information"
@@ -294,19 +318,25 @@ class TungstenManageConfiguration
     home = opt(:tungsten_replicator_home)
     TU.mkdir_if_absent("#{home}/service_logs")
     tpmlog = "#{home}/service_logs/tungsten-configure.log"
+    hook_arguments = []
+    hook_arguments << "--tungsten-replicator-home=#{home}"
     
     if File.exists?("#{home}/tungsten")
       begin
+        call_hook(:hook_before_tr_update, hook_arguments)
         TU.notice("Update #{home}/tungsten")
         TU.cmd_result("#{opt(:tungsten_replicator_home)}/tungsten/tools/tpm update --tty --log=#{tpmlog}")
+        call_hook(:hook_after_tr_update, hook_arguments)
       rescue CommandError => ce
         TU.debug(ce)
         raise "Unable to update Tungsten Replicator check #{tpmlog} for more information"
       end
     else
       begin
+        call_hook(:hook_before_tr_install, hook_arguments)
         TU.notice("Install #{opt(:tungsten_replicator_package)}")
         TU.cmd_result("#{opt(:tungsten_replicator_package)}/tools/tpm install --tty --log=#{tpmlog}")
+        call_hook(:hook_after_tr_install, hook_arguments)
       rescue CommandError => ce
         TU.debug(ce)
         raise "Unable to install Tungsten Replicator check #{tpmlog} for more information"
@@ -519,6 +549,7 @@ class TungstenManageConfiguration
   
   def uninstall_entry(entry)
     enable_script_log()
+    call_hook(:hook_before_uninstall)
     
     if entry_is_type?(entry, ["datasource", "connector"])
       begin
@@ -542,6 +573,7 @@ class TungstenManageConfiguration
     
     TU.cmd_result("rm -f #{opt(:outputfile)}", true)
     TU.cmd_result("rm -f #{get_original_file(opt(:outputfile))}", true)
+    call_hook(:hook_after_uninstall)
   end
   
   # Calculate the hostnames needed to run the listed services
@@ -1065,6 +1097,71 @@ class TungstenManageConfiguration
       :help => "Update the hosts configuration during each run of #{script_name()}. Valid values: puppet."
     })
     
+    add_option(:hook_error, {
+      :on => "--hook-error String",
+      :help => "Call this script if the command does not finish successfully"
+    })
+    
+    add_option(:hook_before_install, {
+      :on => "--hook-before-install String",
+      :help => "Call this script before starting the install command"
+    })
+    
+    add_option(:hook_after_install, {
+      :on => "--hook-after-install String",
+      :help => "Call this script after starting the install command"
+    })
+    
+    add_option(:hook_before_uninstall, {
+      :on => "--hook-before-uninstall String",
+      :help => "Call this script before finishing the uninstall command"
+    })
+    
+    add_option(:hook_after_uninstall, {
+      :on => "--hook-after-uninstall String",
+      :help => "Call this script after finishing the uninstall command"
+    })
+    
+    add_option(:hook_before_ct_install, {
+      :on => "--hook-before-ct-install String",
+      :help => "Call this script before installing Continuent Tungsten"
+    })
+    
+    add_option(:hook_after_ct_install, {
+      :on => "--hook-after-ct-install String",
+      :help => "Call this script after installing Continuent Tungsten"
+    })
+    
+    add_option(:hook_before_ct_update, {
+      :on => "--hook-before-ct-update String",
+      :help => "Call this script before updating Continuent Tungsten"
+    })
+    
+    add_option(:hook_after_ct_update, {
+      :on => "--hook-after-ct-update String",
+      :help => "Call this script after updating Continuent Tungsten"
+    })
+    
+    add_option(:hook_before_tr_install, {
+      :on => "--hook-before-tr-install String",
+      :help => "Call this script before installing Tungsten Replicator"
+    })
+    
+    add_option(:hook_after_tr_install, {
+      :on => "--hook-after-tr-install String",
+      :help => "Call this script after installing Tungsten Replicator"
+    })
+    
+    add_option(:hook_before_tr_update, {
+      :on => "--hook-before-tr-update String",
+      :help => "Call this script before updating Tungsten Replicator"
+    })
+    
+    add_option(:hook_after_tr_update, {
+      :on => "--hook-after-tr-update String",
+      :help => "Call this script after updating Tungsten Replicator"
+    })
+    
     add_command(:install, {
       :help => "Write the INI configuration file and install/update software",
       :default => true
@@ -1271,6 +1368,10 @@ class TungstenManageConfiguration
       end
     end
     
+    if code != 0
+      call_hook(:hook_error, ["--rc=#{code}"])
+    end
+    
     super(code)
   end
   
@@ -1358,6 +1459,27 @@ class TungstenManageConfiguration
       }
       
       return false
+    end
+  end
+  
+  # Call the prescribed hook as a script
+  def call_hook(hookname, arguments = [])
+    if opt(hookname).to_s() == ""
+      return
+    end
+    
+    if script_name() != ""
+      arguments << "--tungsten-script-name=#{script_name()}"
+    end
+    if command() != ""
+      arguments << "--tungsten-script-command=#{command()}"
+    end
+    arguments << "--tungsten-script-hook=#{hookname.to_s()}"
+    
+    begin
+      TU.cmd_result("#{opt(hookname)} #{arguments.join(" ")}")
+    rescue CommandError => ce
+      raise "There were errors while executing #{opt(hookname)}"
     end
   end
   
