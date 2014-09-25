@@ -171,6 +171,10 @@ class TungstenDirectory
       }
     }
     
+    if has_filters?()
+      directory_entries = apply_filters(directory_entries, opt(:filters))
+    end
+    
     return directory_entries
   end
   
@@ -227,6 +231,91 @@ class TungstenDirectory
     return hosts_map
   end
   
+  def has_filters?
+    filters = opt(:filters)
+    
+    if filters == nil
+      return false
+    end
+    
+    if filters.is_a?(Array) && filters.count() > 0
+      return true
+    else
+      return false
+    end
+  end
+  
+  # Remove any entry that does not match the provided filters
+  def apply_filters(entries, filters)
+    filters.each{
+      |filter|
+      parts = filter.split("=")
+      
+      # Determine if the filter is joined with a '=' or '!='
+      last_char=parts[0][-1,1]
+      if last_char == "!"
+        test_equals = false
+        key = parts[0][0, parts[0].length()-1]
+        match = parts[1]
+      else
+        test_equals = true
+        key = parts[0]
+        match = parts[1]
+      end
+      
+      entries.each{
+        |e, entry|
+        # Find the key value in entry, or nil if it doesn't exist
+        value = find_entry_setting(entry, key)
+        
+        # Calculate if the returned value matches the filter value
+        if value.is_a?(Array)
+          is_equal = false
+          value.each{
+            |v|
+            if is_value_match?(v, match)
+              is_equal = true
+            end
+          }
+        else
+          is_equal = is_value_match?(value, match)
+        end
+        
+        # Delete the entry if the result of the match check isn't what
+        # the filter is looking for
+        if is_equal != test_equals
+          entries.delete(e)
+        end
+      }
+    }
+    
+    return entries
+  end
+  
+  def is_value_match?(value, match)
+    match = match.sub("%", ".*")
+    matches = value.to_s().match("^#{match}$")
+    if matches == nil
+      return false
+    else
+      return true
+    end
+  end
+  
+  def find_entry_setting(entry, key)
+    attrs = key.split(".")
+    attr_count = attrs.size
+    current_val = entry
+    for i in 0..(attr_count-1)
+      attr_name = attrs[i]
+      return current_val[attr_name] if i == (attr_count-1)
+      return nil if current_val[attr_name].nil?
+      current_val = current_val[attr_name]
+    end
+    
+    return nil
+  end
+  
   def configure
     super()
     
@@ -243,6 +332,22 @@ class TungstenDirectory
       :help => "Use this hostname for calculating hosts entries",
       :default => TU.hostname()
     })
+    
+    add_option(:filters, {
+      :on => "--filter String"
+    }) {|val|
+      unless @options.has_key?(:filters)
+        @options[:filters] = []
+      end
+
+      parts = val.split("=")
+      if parts.count() != 2
+        TU.error("Unable to parse --filter=#{val}. The filter should be in the form of 'key=value' or 'key!=value'.")
+      end
+
+      @options[:filters] << val
+      nil
+    }
     
     add_command(:list, {
       :help => "Output the directory information as JSON",
