@@ -16,8 +16,6 @@
 # Initial developer(s): Jeff Mace
 # Contributor(s):
 
-# TODO : Removing missing datasources from the cluster
-
 begin
   require 'rubygems'
   gem 'continuent-tools-core'
@@ -631,7 +629,6 @@ class TungstenManageConfiguration
   end
   
   # Returns a parsed version of the output from tungsten_directory
-  # TODO : Support passing arguments to tungsten_directory
   def load_directory_entries
     begin
       json = TU.cmd_result("tungsten_directory")

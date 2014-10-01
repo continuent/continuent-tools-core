@@ -5,9 +5,9 @@ The continuent-tools-core is a package of libraries and scripts to use with most
 
 The code is focused around the 'TungstenScript' Ruby class that is found in Tungsten Replicator. When the gem is built, these files are automatically exported from [https://code.google.com/p/tungsten-replicator/](https://code.google.com/p/tungsten-replicator/).
 
-Installation may be done using the 'gem' utility. This will ensure that all prerequisites are installed.
+Installation may be done using the `gem` utility. This will ensure that all prerequisites are installed.
 
-    gem install continuent-tools-core
+    $> gem install continuent-tools-core
     
 Using the tungsten\_create\_load script
 ===

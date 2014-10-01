@@ -99,25 +99,42 @@ Running the script without any arguments will use the settings placed in `/etc/t
 
 This script should be put on some kind of schedule so that updates to directory information or `/etc/tungsten/defaults.tungsten.ini` are applied to the installed software.
 
-Integrations
+Integration With External Scripts
 ===
 
-Integration with Puppet
----
+The `tungsten_manage_configuration` script may call external scripts at times during execution. These are managed with various hook arguments. When you specify a script for the hook argument, it will be called along with some additional options. These options are:
 
-TBD
+* `--tungsten-script-name` - The script name that you called
+* `--tungsten-script-command` - The subcommand of the script that is being executed
+* `--tungsten-script-hook` - This is the name of the hook in case you specify the same script for multiple arguments
 
-Integration with Chef
----
+The available hooks are listed below. Any additional hook options are listed underneath the hook.
 
-TBD
+* `--hook-before-install` - Called prior to all execution of the 'install' command
+* `--hook-after-install` - Called after all execution of the 'install' command
+* `--hook-before-uninstall` - Called prior to all execution of the 'uninstall' command
+* `--hook-after-uninstall` - Called after all execution of the 'uninstall' command
+* `--hook-before-ct-install` - Called before installing a new Continuent Tungsten server
+  * `--add-cluster` - The cluster being added
+  * `--remove-cluster` - The cluster being removed
+  * `--add-member` - The member being added as 'cluster.hostname'
+  * `--remove-member` - The member being removed as 'cluster.hostname'
+* `--hook-after-ct-install` - Called after installing a new Continuent Tungsten server
+* `--hook-before-ct-update` - Called before updating an existing Continuent Tungsten server
+* `--hook-after-ct-update` - Called after updating an existing Continuent Tungsten server
+* `--hook-before-tr-install` - Called before installing a new Tungsten Replicator server
+* `--hook-after-tr-install` - Called after installing a new Tungsten Replicator server
+* `--hook-before-tr-update` - Called before updating an existing Tungsten Replicator server
+* `--hook-after-tr-update` - Called after updating an existing Tungsten Replicator server
+* `--hook-error` - Called if the script is exiting with an error
 
-Integration with AWS CloudFormation
----
+Like all options, the hooks may be defined in the `/etc/tungsten/manage_configuration.ini` file.
 
-TBD
+Uninstalling Managed Continuent Tungsten
+===
 
-Integration with AWS EC2
----
+Follow these steps if you need to remove Continuent Tungsten and any information created by `tungsten_manage_configuration`.
 
-TBD
+    $> tungsten_manage_configuration uninstall
+    $> rm -f /etc/tungsten/tungsten_manage_configuration.lastrun
+    $> rm -f /etc/tungsten/tungsten_manage_configuration.log
