@@ -13,17 +13,16 @@ class AWSEC2TungstenDirectoryProvider < TungstenDirectoryProvider
         raise "The aws-sdk Ruby gem or rubygem-aws-sdk package is required for this class"
       end
     end
-    
-    if aws_info.has_key?("access_key_id")
+
+    if aws_info.has_key?("access_key_id") && aws_info.has_key?("secret_access_key")
       AWS.config({
-        :access_key_id => aws_info["access_key_id"]
-      })
-    end
-    if aws_info.has_key?("secret_access_key")
-      AWS.config({
+        :access_key_id => aws_info["access_key_id"],
         :secret_access_key => aws_info["secret_access_key"]
       })
+    else
+      AWS.config(:credential_provider => AWS::Core::CredentialProviders::EC2Provider.new)
     end
+
     ec2 = AWS::EC2.new()
     
     if aws_info.has_key?("hostname_tag")
