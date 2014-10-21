@@ -1321,7 +1321,7 @@ class TungstenManageConfiguration
         install = TungstenInstall.new("#{opt(:continuent_tungsten_home)}/tungsten")
         
         svc = install.setting("deployment_dataservice")
-        composite_svc = install.setting(TI.setting_key("dataservices", svc, "dataservice_parent_dataservice"))
+        composite_svc = install.setting(install.setting_key("dataservices", svc, "dataservice_parent_dataservice"))
         
         pending_svc = entry["tags"][CLUSTER_NAME]
         pending_composite_svc = entry["tags"][COMPOSITE_CLUSTER_NAME]
