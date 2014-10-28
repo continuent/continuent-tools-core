@@ -13,6 +13,7 @@ class AWSEC2TungstenDirectoryProvider < TungstenDirectoryProvider
         raise "The aws-sdk Ruby gem or rubygem-aws-sdk package is required for this class"
       end
     end
+    AWS.eager_autoload!(AWS::EC2)
     
     if aws_info.has_key?("access_key_id")
       AWS.config({
@@ -51,46 +52,51 @@ class AWSEC2TungstenDirectoryProvider < TungstenDirectoryProvider
         region_results[index] = {}
         TU.debug("Collect ec2_hosts from #{region}")
         
-        region_ec2 = AWS::EC2.new(:region => region)
-        instances = region_ec2.instances().filter('instance-state-name', "running")
+        begin
+          region_ec2 = AWS::EC2.new(:region => region)
+          instances = region_ec2.instances().filter('instance-state-name', "running")
 
-        if aws_info.has_key?("tag_key")
-          if aws_info.has_key?("tag_value")
-            instances = instances.with_tag(aws_info["tag_key"], aws_info["tag_value"])
+          if aws_info.has_key?("tag_key")
+            if aws_info.has_key?("tag_value")
+              instances = instances.with_tag(aws_info["tag_key"], aws_info["tag_value"])
+            else
+              instances = instances.tagged(aws_info["tag_key"])
+            end
           else
-            instances = instances.tagged(aws_info["tag_key"])
+            instances = instances.tagged('tungsten-ServerType')
           end
-        else
-          instances = instances.tagged('tungsten-ServerType')
-        end
-        instances.each{
-          |ins|
-          tags = ins.tags.to_h()
+          instances.each{
+            |ins|
+            tags = ins.tags.to_h()
           
-          name = tags.to_h()[hostname_tag]
-          if name.to_s() == ""
-            TU.error("Unable to identify the hostname for #{ins.id} in #{region}")
-          end
+            name = tags.to_h()[hostname_tag]
+            if name.to_s() == ""
+              TU.error("Unable to identify the hostname for #{ins.id} in #{region}")
+            end
           
           
-          if ins.vpc_id != nil
-            location = ins.availability_zone + "." + ins.vpc_id
-          else
-            location = ins.availability_zone
-          end
+            if ins.vpc_id != nil
+              location = ins.availability_zone + "." + ins.vpc_id
+            else
+              location = ins.availability_zone
+            end
           
-          TU.debug("Found #{ins.id}")
-          region_results[index][name] = {
-            'id' => ins.id.to_s(),
-            'hostname' => name,
-            'location' => location,
-            'public-address' => ins.public_ip_address,
-            'private-address' => ins.private_ip_address,
-            'tags' => tags.to_h(),
-            'provider' => "aws.ec2",
-            'autodetect-key' => @key
+            TU.debug("Found #{ins.id}")
+            region_results[index][name] = {
+              'id' => ins.id.to_s(),
+              'hostname' => name,
+              'location' => location,
+              'public-address' => ins.public_ip_address,
+              'private-address' => ins.private_ip_address,
+              'tags' => tags.to_h(),
+              'provider' => "aws.ec2",
+              'autodetect-key' => @key
+            }
           }
-        }
+        rescue => e
+          TU.debug("Error finding instances in #{region}: #{e.message}")
+          raise e
+        end
       }
     }
     

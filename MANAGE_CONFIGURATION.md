@@ -51,7 +51,7 @@ These entries define a single host and provide all information for the host in q
     
 *AWS EC2 Autodetect Entries*
 
-These entries tell `tungsten_directory` to connect with the AWS API and find instances that have been tagged with the `tungsten-ServerType`.
+These entries tell `tungsten_directory` to connect with the AWS API and find instances that have been tagged with the `tungsten-ServerType`. If you are using IAM Roles instead of explicit key and secret, remove the access\_key\_id and secret\_access\_key lines from directory.ini.
 
     [autodetect.aws.ec2]
     access_key_id=XXXXXXX
