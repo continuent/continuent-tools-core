@@ -93,6 +93,8 @@ class AWSEC2TungstenDirectoryProvider < TungstenDirectoryProvider
               'autodetect-key' => @key
             }
           }
+        rescue AWS::EC2::Errors::AuthFailure => af
+          TU.debug("Unable to find instances in #{region}: #{af.message}. Operation will continue.")
         rescue => e
           TU.debug("Error finding instances in #{region}: #{e.message}")
           raise e
