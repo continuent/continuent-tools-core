@@ -512,7 +512,7 @@ class TungstenManageConfiguration
     if provision_source != nil
       TU.notice("Provisioning the server. This may take some time.")
       begin
-        TU.tungsten_cmd_result("#{home}/tungsten/tungsten-replicator/scripts/tungsten_provision_slave --source=#{provision_source}")
+        TU.tungsten_cmd_result("#{home}/tungsten/tungsten-replicator/scripts/tungsten_provision_slave --source=#{provision_source} #{opt(:provision_slave_arguments)}")
       rescue CommandError => ce
         TU.debug(ce)
         raise "Unable to provision #{entry["hostname"]}. Review the log for more information."
@@ -1092,6 +1092,11 @@ class TungstenManageConfiguration
     add_option(:manage_etc_hosts, {
       :on => "--manage-etc-hosts String",
       :help => "Update the hosts configuration during each run of #{script_name()}. Valid values: puppet."
+    })
+    
+    add_option(:provision_slave_arguments, {
+      :on => "--provision-slave-arguments String",
+      :help => "Additional arguments to pass along to the tungsten_provision_slave command"
     })
     
     add_option(:hook_error, {
