@@ -1,10 +1,31 @@
 class AWSEC2TungstenDirectoryProvider < TungstenDirectoryProvider
+  DEFAULT_HOSTNAME_TAG = "Name"
+  
   def self.get_regex()
     "aws\.ec2.*"
   end
   
   def get_entries(aws_info)
+    hostname_tag = DEFAULT_HOSTNAME_TAG
+    require_hostname_tag = false
     aws_entries = {}
+    
+    if aws_info.has_key?("hostname_tag")
+      hostname_tag = aws_info["hostname_tag"]
+      
+      if aws_info.has_key?("require_hostname_tag") && aws_info["require_hostname_tag"].to_s() == "false"
+        if aws_info["hostname_tag"] == DEFAULT_HOSTNAME_TAG
+          # Only allow the use of DEFAULT_HOSTNAME_TAG
+          require_hostname_tag = true
+        else
+          # Allow the use of the given tag and DEFAULT_HOSTNAME_TAG
+          require_hostname_tag = false
+        end
+      else
+        # Only allow the use of DEFAULT_HOSTNAME_TAG
+        require_hostname_tag = true
+      end
+    end
     
     unless defined?(AWS)
       begin
@@ -26,12 +47,6 @@ class AWSEC2TungstenDirectoryProvider < TungstenDirectoryProvider
       })
     end
     ec2 = AWS::EC2.new()
-    
-    if aws_info.has_key?("hostname_tag")
-      hostname_tag = aws_info["hostname_tag"]
-    else
-      hostname_tag = "Name"
-    end
 
     region_index = -1
     region_threads = []
@@ -70,6 +85,12 @@ class AWSEC2TungstenDirectoryProvider < TungstenDirectoryProvider
             tags = ins.tags.to_h()
           
             name = tags.to_h()[hostname_tag]
+            
+            if name.to_s() == "" && require_hostname_tag == false
+              # Allow the DEFAULT_HOSTNAME_TAG to be used as a backup
+              name = tags.to_h()[DEFAULT_HOSTNAME_TAG]
+            end
+            
             if name.to_s() == ""
               TU.error("Unable to identify the hostname for #{ins.id} in #{region}")
             end
