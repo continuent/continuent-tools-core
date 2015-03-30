@@ -358,78 +358,141 @@ class TungstenManageConfiguration
     end
   end
   
+  # Identify if this server should be started as a slave to an existing
+  # master or relay server. If a valid master or relay, can't be found
+  # the replicator will be started with its default role.
   def provision_cluster_replicator(home, entry)
-    provision_source = nil
-    role = nil
-    serviceName = nil
     install = TungstenInstall.new("#{home}/tungsten")
     
-    # Collect some settings directly from trepctl
-    begin
-      TU.cmd_result("#{home}/tungsten/tungsten-replicator/bin/replicator start offline")
-      role = install.trepctl_value(install.default_dataservice(), "role")
-      serviceName = install.trepctl_value(install.default_dataservice(), "serviceName")
-    rescue CommandError => ce
-      TU.debug(ce)
-      raise "Unable to provision #{entry["hostname"]} due to issues checking replicator settings. Review the log for more information."
-    ensure
-      TU.cmd_result("#{home}/tungsten/tungsten-replicator/bin/replicator stop", true)
-    end
+    # What is the role we will assign to this replicator
+    role = nil
+    # What is the default role of this replicator
+    default_role = install.setting(install.setting_key(REPL_SERVICES, install.default_dataservice(), "repl_role"))
     
-    if role == "slave"
-      # We will autodetect the provision source
-      provision_source = "autodetect"
+    # The THL URI to use when the role will be changed to slave
+    master_listen_uri = nil
+    # Command used to identify the master listen uri on a remote replicator
+    masterListenUriCommand = "#{install.base_path()}/tungsten-replicator/bin/trepctl properties -filter replicator.master.listen.uri -values"
+    
+    # A valid host that can be used in the tungsten_provision_slave command
+    provision_source = nil
+    
+    # Collect the current state from all other members and identify if there 
+    # is already a valid master or relay server the cluster.
+    master = nil
+    relay = nil
+    
+    service_members = install.setting(install.setting_key(DATASERVICES, install.default_dataservice(), "dataservice_hosts")).split(",")
+    service_members.each{
+      |member|
+      if member == opt(:hostname)
+        next
+      end
       
-      # Identify all running replicators in the local cluster
       begin
-        available_replicators = JSON.parse(TU.cmd_result("#{home}/tungsten/tungsten-replicator/scripts/multi_trepctl --paths=self --output=json --fields=*"))
-      rescue CommandError => ce
-        TU.debug(ce)
-        raise "Unable to find other replicators running in this cluster."
-      end
-    
-      # If there aren't any running then this is probably the initial startup
-      # All servers should come up in their default state
-      if available_replicators.size() == 0
-        return
-      end
-    
-      # Fina a master or relay server to connect to
-      master = nil
-      relay = nil
-      available_replicators.each{
-        |r|
-        if r["host"] == entry["hostname"]
-          next
-        end
+        # Get the cctrl contents in a JSON object
+        contents = nil
+        Timeout.timeout(15) {
+          contents = TU.ssh_result("if [ -f #{install.base_path()}/tools/tpm ]; then #{install.base_path()}/tools/tpm cctrl; else echo \"\"; fi", member, install.user())
+        }
         
-        if r["serviceName"] != serviceName
-          # This replicator is outside of the local cluster
-          next
-        end
+        result = result = JSON.parse(contents)
+        if result.instance_of?(Hash)
+          values = result["#{member}:#{install.root()}"]
+          
+          if values == nil
+            next
+          end
+          if values["manager_is_running"] != "true"
+            next
+          end
+          
+          # Only one member of the cluster should be a coordinator so we 
+          # use that to make sure we are looking at the correct output. 
+          # In some corner cases, there may be multiple coordinators. In the 
+          # event that this happens and each gives a different state, the 
+          # script will throw an error.
+          if values["cctrl"]["coordinator"]["state"] != "ONLINE"
+            next
+          end
+          if values["cctrl"]["coordinator"]["host"] != member
+            next
+          end
+          
+          # Go through each datasource to find the ONLINE master or relay
+          values["cctrl"]["datasources"].each{
+            |ds, ds_values|
+            if ds == opt(:hostname)
+              # Skip the local datasource in case it is still listed in 
+              # the cluster cctrl output
+              next
+            end
+            
+            if ds_values["role"] != ds_values["replicator"]["role"]
+              # Skip because the datasource and replicator roles 
+              # do not match
+              next
+            end
+            
+            if ds_values["status"] != "ONLINE"
+              # Skip because the datasource is not ONLINE
+              next
+            end
         
-        if r["state"] != "ONLINE"
-          # We only want to look at replicators that are ONLINE
-          next
+            if ds_values["replicator"]["status"] != "ONLINE"
+              # Skip because the replicator is not ONLINE
+              next
+            end
+            
+            if ds_values["role"] == "master"
+              if master == nil
+                master = ds
+              elsif master != ds
+                # There are multiple coordinators and they don't agree on the 
+                # current master.
+                throw "Unable to provision because both #{ds} and #{master} are listed as ONLINE master datasources"
+              end
+            elsif ds_values["role"] == "relay"
+              if relay == nil
+                relay = ds
+              elsif relay != ds
+                # There are multiple coordinators and they don't agree on the 
+                # current relay.
+                throw "Unable to provision because both #{ds} and #{relay} are listed as ONLINE relay datasources"
+              end
+            else
+              provision_source = ds
+            end
+          }
+
         end
+      rescue JSON::ParserError
+      rescue CommandError
+      rescue RemoteCommandError
+      rescue MessageError => me
+      rescue Timeout::Error
+      end
+    }
+    
+    # Collect the THL URI from the server identified as a valid master or 
+    # relay. 
+    if master != nil
+      role = "slave"
+      master_listen_uri = TU.ssh_result(masterListenUriCommand, master, install.user())
+      
+      if provision_source == nil
+        provision_source = master
+      end
+    elsif relay != nil
+      role = "slave"
+      master_listen_uri = TU.ssh_result(masterListenUriCommand, relay, install.user())
+      
+      if provision_source == nil
+        provision_source = relay
+      end
+    end
         
-        if r["role"] == "master"
-          master = r
-        elsif r["role"] == "relay"
-          relay = r
-        end
-      }
-    
-      # Use a relay server if no master service was found
-      if master == nil && relay != nil
-        master = relay
-      end
-    
-      if master == nil
-        # There is no master so there is no clear decision that we can make
-        return
-      end
-    
+    if role == "slave"
       # Write the slave connection information to the dynamic properties file
       dynamic_path = install.setting(install.setting_key(REPL_SERVICES, install.default_dataservice(), 'repl_svc_dynamic_config'))
       if dynamic_path.to_s() == ""
@@ -437,45 +500,132 @@ class TungstenManageConfiguration
       end
       File.open(dynamic_path, "w") {
         |f|
-        f.puts("replicator.master.connect.uri=#{master["masterListenUri"]}")
+        f.puts("replicator.master.connect.uri=#{master_listen_uri}")
         f.puts("replicator.role=slave")
       }
-    elsif role == "relay"
-      # Identify all running replicators in the local cluster
-      begin
-        available_replicators = JSON.parse(TU.cmd_result("#{home}/tungsten/tungsten-replicator/scripts/multi_trepctl --paths=self --output=json --fields=*"))
-      rescue CommandError => ce
-        TU.debug(ce)
-        raise "Unable to find other replicators running in this cluster."
+    elsif default_role == "master"
+      # Write the dynamic properties file so that any future runs
+      # of this script will not cause this replicator to change role.
+      dynamic_path = install.setting(install.setting_key(REPL_SERVICES, install.default_dataservice(), 'repl_svc_dynamic_config'))
+      if dynamic_path.to_s() == ""
+        raise "Unable to set the default role because the dynamic properties file could not be found."
       end
-    
-      # If there aren't any running then this is probably the initial startup
-      # All servers should come up in their default state
-      if available_replicators.size() == 0
-        return
-      end
-    
-      # Find a master to connect to
+      File.open(dynamic_path, "w") {
+        |f|
+        f.puts("replicator.role=master")
+      }
+    elsif default_role == "relay"
       master = nil
-      available_replicators.each{
-        |r|
-        if r["host"] == entry["hostname"]
+      
+      composite_datasources = install.setting([DATASERVICES, entry["tags"][COMPOSITE_CLUSTER_NAME], "dataservice_composite_datasources"].join('.'))
+      composite_datasources.split(",").each{
+        |composite_ds|
+
+        # We don't need to continue after finding a master
+        if master_listen_uri != nil
           next
         end
         
-        if r["state"] != "ONLINE"
-          # We only want to look at replicators that are ONLINE
+        # Don't look in the local cluster because we've already checked for 
+        # valid datasources there
+        if composite_ds == entry["tags"][CLUSTER_NAME]
           next
         end
         
-        if r["role"] == "master"
-          master = r
-        end
+        service_members = install.setting([DATASERVICES, composite_ds, "dataservice_hosts"].join('.')).split(",")
+        service_members.each{
+          |member|
+          if member == opt(:hostname)
+            next
+          end
+
+          begin
+            # Get the cctrl contents in a JSON object
+            contents = nil
+            Timeout.timeout(15) {
+              contents = TU.ssh_result("if [ -f #{install.base_path()}/tools/tpm ]; then #{install.base_path()}/tools/tpm cctrl; else echo \"\"; fi", member, install.user())
+            }
+
+            result = result = JSON.parse(contents)
+            if result.instance_of?(Hash)
+              values = result["#{member}:#{install.root()}"]
+
+              if values == nil
+                next
+              end
+              if values["manager_is_running"] != "true"
+                next
+              end
+
+              # Only one member of the cluster should be a coordinator so we 
+              # use that to make sure we are looking at the correct output. 
+              # In some corner cases, there may be multiple coordinators. In  
+              # the event that this happens and each gives a different state, 
+              # the script will throw an error.
+              if values["cctrl"]["coordinator"]["state"] != "ONLINE"
+                next
+              end
+              if values["cctrl"]["coordinator"]["host"] != member
+                next
+              end
+
+              # Go through each datasource to find the ONLINE master or relay
+              values["cctrl"]["datasources"].each{
+                |ds, ds_values|
+                if ds == opt(:hostname)
+                  # Skip the local datasource in case it is still listed in 
+                  # the cluster cctrl output
+                  next
+                end
+                
+                if ds_values["role"] != ds_values["replicator"]["role"]
+                  # Skip because the datasource and replicator roles 
+                  # do not match
+                  next
+                end
+                
+                if ds_values["status"] != "ONLINE"
+                  # Skip because the datasource is not ONLINE
+                  next
+                end
+            
+                if ds_values["replicator"]["status"] != "ONLINE"
+                  # Skip because the replicator is not ONLINE
+                  next
+                end
+
+                if ds_values["role"] == "master"
+                  if master == nil
+                    master = ds
+                  elsif master != ds
+                    # There are multiple coordinators and they don't agree on the 
+                    # current master.
+                    throw "Unable to provision because both #{ds} and #{master} are listed as ONLINE master datasources"
+                  end
+                else
+                  provision_source = ds
+                end
+              }
+
+            end
+          rescue JSON::ParserError
+          rescue CommandError
+          rescue RemoteCommandError
+          rescue MessageError => me
+          rescue Timeout::Error
+          end
+        }
       }
     
       if master == nil
         # There is no master so there is no clear decision that we can make
         return
+      end
+      
+      master_listen_uri = TU.ssh_result(masterListenUriCommand, master, install.user())
+      
+      if provision_source == nil
+        provision_source = master
       end
     
       # Write the slave connection information to the dynamic properties file
@@ -485,28 +635,9 @@ class TungstenManageConfiguration
       end
       File.open(dynamic_path, "w") {
         |f|
-        f.puts("replicator.master.connect.uri=#{master["masterListenUri"]}")
+        f.puts("replicator.master.connect.uri=#{master_listen_uri}")
         f.puts("replicator.role=relay")
       }
-      
-      available_replicators.each{
-        |r|
-        if r["host"] == entry["hostname"]
-          next
-        end
-        
-        if r["state"] != "ONLINE"
-          # We only want to look at replicators that are ONLINE
-          next
-        end
-        
-        if r["role"] == "slave"
-          provision_source = r["host"]
-        end
-      }
-      if provision_source == nil
-        provision_source = master["host"]
-      end
     end
 
     if provision_source != nil
@@ -778,8 +909,12 @@ class TungstenManageConfiguration
       end
     end
     
-    if entry["tags"][CLUSTER_PASSIVE_WITNESS].to_s() != ""
-      map[svc]["passive-witness"] = entry["tags"][CLUSTER_PASSIVE_WITNESS]
+    # Only use the passive witness if it was defined for this host
+    # The check makes sure that entry is the directory entry for the current host
+    if entry["hostname"] == opt(:hostname)
+      if entry["tags"][CLUSTER_PASSIVE_WITNESS].to_s() != ""
+        map[svc]["passive-witness"] = entry["tags"][CLUSTER_PASSIVE_WITNESS]
+      end
     end
   end
   
@@ -906,6 +1041,10 @@ class TungstenManageConfiguration
       if map[svc]["topology"] == "cluster-slave"
         map[svc]["members"].delete_if{|v| v != entry["hostname"]}
       elsif map[svc]["topology"] == "clustered"
+        # Pick a default master for this dataservice using the first member 
+        # when sorted alphabetically. The role may be charged when Continuent 
+        # is started the first time if another member is already running as 
+        # the master. 
         map[svc]["master"] = map[svc]["members"].sort()[0]
         
         if map[svc].has_key?("active-witness")
@@ -915,8 +1054,9 @@ class TungstenManageConfiguration
           map[svc]["members"] = map[svc]["members"] << map[svc]["active-witness"]
           map[svc]["members"] = map[svc]["members"].uniq().sort()
         else
-          even_members = (map[svc]["members"].size() % 2 == 0)
-          if even_members == true
+          members_count = map[svc]["members"].size()
+          even_members = (members_count % 2 == 0)
+          if even_members == true || members_count == 1
             if map[svc].has_key?("passive-witness")
               map[svc]["witnesses"] = map[svc]["passive-witness"]
             end

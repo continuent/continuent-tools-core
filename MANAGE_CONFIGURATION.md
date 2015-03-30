@@ -138,3 +138,18 @@ Follow these steps if you need to remove Continuent Tungsten and any information
     $> tungsten_manage_configuration uninstall
     $> rm -f /etc/tungsten/tungsten_manage_configuration.lastrun
     $> rm -f /etc/tungsten/tungsten_manage_configuration.log
+    
+Known Issues
+===
+
+# The installation fails complaining about connections to other database servers.
+
+    #####################################################################
+    # Validation failed
+    #####################################################################
+    #####################################################################
+    # Errors for db3
+    #####################################################################
+    ERROR >> db3 >> Unable to connect to the MySQL server on db2 (MySQLPermissionsCheck)
+    
+  This can be resolved by making sure that MySQL on that server is running or adding 'skip-validation-check=MySQLPermissionsCheck' to the /etc/tungsten/defaults.tungsten.ini file. After taking this action, run the tungsten_manage_configuration script again. Check /etc/tungsten/tungsten_manage_configuration.log to see if there were any additional issues.
