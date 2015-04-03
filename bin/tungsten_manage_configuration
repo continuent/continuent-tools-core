@@ -398,12 +398,14 @@ class TungstenManageConfiguration
         
         result = result = JSON.parse(contents)
         if result.instance_of?(Hash)
-          values = result["#{member}:#{install.root()}"]
+          values = result["#{TU.to_identifier(member)}:#{install.root()}"]
           
           if values == nil
+            TU.debug("Unable to find cctrl results for #{TU.to_identifier(member)}:#{install.root()}")
             next
           end
           if values["manager_is_running"] != "true"
+            TU.debug("Skipping this member because the manager is not running")
             next
           end
           
@@ -412,10 +414,12 @@ class TungstenManageConfiguration
           # In some corner cases, there may be multiple coordinators. In the 
           # event that this happens and each gives a different state, the 
           # script will throw an error.
-          if values["cctrl"]["coordinator"]["state"] != "ONLINE"
+          if values["cctrl"]["coordinator"]["host"] != member
+            TU.debug("Skipping this member because it is not the coordinator")
             next
           end
-          if values["cctrl"]["coordinator"]["host"] != member
+          if values["cctrl"]["coordinator"]["state"] != "ONLINE"
+            TU.debug("Skipping this member because the coordinator is not ONLINE")
             next
           end
           
@@ -423,24 +427,22 @@ class TungstenManageConfiguration
           values["cctrl"]["datasources"].each{
             |ds, ds_values|
             if ds == opt(:hostname)
-              # Skip the local datasource in case it is still listed in 
-              # the cluster cctrl output
+              TU.debug("Skip the #{ds} datasource because it is the current host")
               next
             end
             
             if ds_values["role"] != ds_values["replicator"]["role"]
-              # Skip because the datasource and replicator roles 
-              # do not match
+              TU.debug("Skip the #{ds} datasource because the replicator and datasource roles do not match")
               next
             end
             
             if ds_values["status"] != "ONLINE"
-              # Skip because the datasource is not ONLINE
+              TU.debug("Skip the #{ds} datasource because it is not ONLINE")
               next
             end
         
             if ds_values["replicator"]["status"] != "ONLINE"
-              # Skip because the replicator is not ONLINE
+              TU.debug("Skip the #{ds} datasource because the replicator is not ONLINE")
               next
             end
             
@@ -548,24 +550,28 @@ class TungstenManageConfiguration
 
             result = result = JSON.parse(contents)
             if result.instance_of?(Hash)
-              values = result["#{member}:#{install.root()}"]
+              values = result["#{TU.to_identifier(member)}:#{install.root()}"]
 
               if values == nil
+                TU.debug("Unable to find cctrl results for #{TU.to_identifier(member)}:#{install.root()}")
                 next
               end
               if values["manager_is_running"] != "true"
+                TU.debug("Skipping this member because the manager is not running")
                 next
               end
 
               # Only one member of the cluster should be a coordinator so we 
               # use that to make sure we are looking at the correct output. 
-              # In some corner cases, there may be multiple coordinators. In  
-              # the event that this happens and each gives a different state, 
-              # the script will throw an error.
-              if values["cctrl"]["coordinator"]["state"] != "ONLINE"
+              # In some corner cases, there may be multiple coordinators. In the 
+              # event that this happens and each gives a different state, the 
+              # script will throw an error.
+              if values["cctrl"]["coordinator"]["host"] != member
+                TU.debug("Skipping this member because it is not the coordinator")
                 next
               end
-              if values["cctrl"]["coordinator"]["host"] != member
+              if values["cctrl"]["coordinator"]["state"] != "ONLINE"
+                TU.debug("Skipping this member because the coordinator is not ONLINE")
                 next
               end
 
@@ -573,24 +579,22 @@ class TungstenManageConfiguration
               values["cctrl"]["datasources"].each{
                 |ds, ds_values|
                 if ds == opt(:hostname)
-                  # Skip the local datasource in case it is still listed in 
-                  # the cluster cctrl output
+                  TU.debug("Skip the #{ds} datasource because it is the current host")
                   next
                 end
-                
+
                 if ds_values["role"] != ds_values["replicator"]["role"]
-                  # Skip because the datasource and replicator roles 
-                  # do not match
+                  TU.debug("Skip the #{ds} datasource because the replicator and datasource roles do not match")
                   next
                 end
-                
+
                 if ds_values["status"] != "ONLINE"
-                  # Skip because the datasource is not ONLINE
+                  TU.debug("Skip the #{ds} datasource because it is not ONLINE")
                   next
                 end
-            
+
                 if ds_values["replicator"]["status"] != "ONLINE"
-                  # Skip because the replicator is not ONLINE
+                  TU.debug("Skip the #{ds} datasource because the replicator is not ONLINE")
                   next
                 end
 
