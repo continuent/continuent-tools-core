@@ -1,0 +1,79 @@
+#!/usr/bin/env ruby
+# Copyright (C) 2014 Continuent, Inc.
+# 
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License.  You may obtain
+# a copy of the License at
+# 
+#         http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+# License for the specific language governing permissions and limitations
+# under the License.
+#
+# Initial developer(s): Jeff Mace
+# Contributor(s):
+
+begin
+  require 'rubygems'
+  gem 'continuent-tools-core'
+rescue LoadError
+end
+
+require 'continuent-tools-core'
+
+class TungstenMigrateSchema
+  include TungstenScript
+  include TungstenAPI
+  private
+  
+  def main
+    if opt(:set) != nil
+      cmd = nil
+      case opt(:set).downcase()
+      when "maintenance"
+        cmd = "setmaintenance"
+      when "automatic"
+        cmd = "setautomatic"
+      when "manual"
+        cmd = "setmanual"
+      end
+      
+      mgr = TungstenDataserviceManager.new(TI.mgr_api_uri())
+      mgr.call(opt(:service), cmd)
+    end
+    
+    status = TungstenStatus.new(TI, opt(:service))
+    TU.output(status.policy())
+  end
+  
+  def configure
+    super()
+    
+    add_option(:service, {
+      :on => "--service String",
+      :help => "The dataservice to check"
+    })
+    
+    add_option(:set, {
+      :on => "--set String",
+      :help => "Policy to enable for this service"
+    })
+  end
+  
+  def validate
+    super()
+    
+    unless TU.is_valid?()
+      return TU.is_valid?()
+    end
+  end
+  
+  def script_name
+    "tungsten_policy"
+  end
+  
+  self.new().run()
+end
