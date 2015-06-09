@@ -43,6 +43,12 @@ class TungstenUtil
   # automatically forward messages to the console and add any TungstenScript 
   # options to the command.
   def tungsten_ssh_result(command, host, user)
+    # Run the command outside of SSH if possible
+    if is_localhost?(host) && 
+        user == whoami()
+      return tungsten_cmd_result(command)
+    end
+    
     original_fwd_state = forward_cmd_results?()
     begin
       if TI
