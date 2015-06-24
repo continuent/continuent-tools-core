@@ -1,0 +1,140 @@
+#!/usr/bin/env ruby
+# Copyright (C) 2015 VMware, Inc.
+# 
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License.  You may obtain
+# a copy of the License at
+# 
+#         http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+# License for the specific language governing permissions and limitations
+# under the License.
+#
+# Initial developer(s): Jeff Mace
+# Contributor(s):
+
+begin
+  require 'rubygems'
+  gem 'continuent-tools-core'
+rescue LoadError
+end
+
+require 'continuent-tools-core'
+
+class TungstenParseTHLIndex
+  include TungstenScript
+  include SingleServiceScript
+  private
+  
+  def main
+    case command()
+    when "count"
+      output_thl_index_count()
+    when "find"
+      find_thl_record()
+    end
+  end
+  
+  def output_thl_index_count
+    each_thl_index_line() {
+      |line|
+      match = parse_thl_index_line(line)
+      if match != nil
+        records = match[:end] - match[:start].to_i() + 1;
+        TU.output("#{match[:file]} - #{records}")
+      end
+    }
+  end
+  
+  def find_thl_record
+    filename = nil
+    
+    begin
+      each_thl_index_line() {
+        |line|
+        match = parse_thl_index_line(line)
+        if match != nil
+          if match[:start] <= opt(:seqno) && match[:end] >= opt(:seqno)
+            filename = match[:file]
+            raise IgnoreError.new()
+          end
+        end
+      }
+    rescue IgnoreError
+      # Do Nothing
+    end
+    
+    if filename != nil
+      TU.output(filename)
+    else
+      TU.error("Unable to find THL event ##{opt(:seqno)}")
+    end
+  end
+  
+  def parse_thl_index_line(line)
+    match = line.strip().match(/^LogIndexEntry (thl\.data\.[0-9]+)\(([0-9]+):([0-9]+)\)$/)
+    
+    if match == nil
+      return nil
+    end
+    
+    return {
+      :file => match[1],
+      :start => match[2].to_i(),
+      :end => match[3].to_i()
+    }
+  end
+  
+  def each_thl_index_line(&block)
+    TU.cmd_stdout("#{TI.thl(opt(:service))} index") {
+      |line|
+      block.call(line.strip())
+    }
+  end
+  
+  def get_thl_index
+    return TU.cmd_result("#{TI.thl(opt(:service))} index").split("\n")
+  end
+  
+  def configure
+    super()
+    
+    add_command(:count, {
+      :help => "Create the stack",
+      :default => true
+    })
+    
+    add_command(:find, {
+      :help => "Find the THL file containing --seqno"
+    })
+    
+    add_option(:seqno, {
+      :on => "--seqno String",
+      :parse => method(:parse_integer_option),
+    })
+  end
+  
+  def validate
+    super()
+    
+    unless TU.is_valid?()
+      return TU.is_valid?()
+    end
+    
+    case command()
+    when "find"
+      if opt(:seqno) == nil
+        TU.error("The --seqno option is required for the find command")
+      end
+    end
+  end
+  
+  def script_name
+    "tungsten_analyze_thl_index"
+  end
+  
+  self.new().run()
+end
