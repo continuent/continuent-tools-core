@@ -46,6 +46,11 @@ class AWSEC2TungstenDirectoryProvider < TungstenDirectoryProvider
         :secret_access_key => aws_info["secret_access_key"]
       })
     end
+    if aws_info.has_key?("proxy_uri")
+      AWS.config({
+        :proxy_uri => aws_info["proxy_uri"]
+      })
+    end
     ec2 = AWS::EC2.new()
 
     region_index = -1
