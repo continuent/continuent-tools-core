@@ -20,6 +20,22 @@
 require 'tungsten'
 
 class TungstenUtil
+  # Override the method imported from tpm to include '>>' to avoid detecting
+  # an error that wasn't thrown by TungstenScript
+  def parse_log_level(line)
+    prefix = line[0,8]
+    
+    case prefix.strip
+    when "ERROR >>" then Logger::ERROR
+    when "WARN  >>" then Logger::WARN
+    when "DEBUG >>" then Logger::DEBUG
+    when "NOTE  >>" then Logger::NOTICE
+    when "INFO  >>" then Logger::INFO
+    else
+      nil
+    end
+  end
+  
   # A wrapper for running another Tungsten script. This will automatically
   # forward messages to the console and add any TungstenScript options to 
   # the command.

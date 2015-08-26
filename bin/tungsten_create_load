@@ -65,7 +65,7 @@ class ContinuentCreateLoad
     [
       "DROP SCHEMA IF EXISTS tungsten_create_load;",
       "CREATE SCHEMA tungsten_create_load;",
-      "CREATE TABLE tungsten_create_load.values (id int NOT NULL auto_increment primary key, val int NOT NULL, origin varchar(32) NULL);"
+      "CREATE TABLE tungsten_create_load.#{opt(:table_name)} (id int NOT NULL auto_increment primary key, val int NOT NULL, origin varchar(32) NULL);"
     ].each{|sql|
       stdin.puts(sql)
       putc '.'
@@ -74,7 +74,7 @@ class ContinuentCreateLoad
   end
   
   def create_schema_load(stdin)
-    sql = "INSERT INTO tungsten_create_load.values (val, origin) VALUES (5, @@hostname);"
+    sql = "INSERT INTO tungsten_create_load.#{opt(:table_name)} (val, origin) VALUES (5, @@hostname);"
     while (ContinuentCreateLoad.interrupted?() == false)
       stdin.puts(sql)
       putc '.'
@@ -113,6 +113,12 @@ class ContinuentCreateLoad
       :on => "--use-connector String",
       :parse => method(:parse_boolean_option),
       :help => "Enable/Disable use of the Tungsten Connector for adding load to the system.",
+    })
+    
+    add_option(:table_name, {
+      :on => "--table-name String",
+      :help => "The MySQL table name to fill with this script",
+      :default => "values"
     })
   end
   
