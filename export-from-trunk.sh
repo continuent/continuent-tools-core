@@ -19,11 +19,11 @@
 cd `dirname $0`/lib
 
 rm -f ./tungsten.rb
-svn export https://tungsten-replicator.googlecode.com/svn/trunk/builder/extra/cluster-home/lib/ruby/tungsten.rb
+svn export  svn+ssh://svn.continuent.com/svnroot/tungsten-replicator/trunk/builder/extra/cluster-home/lib/ruby/tungsten.rb
 rm -rf ./tungsten
-svn export https://tungsten-replicator.googlecode.com/svn/trunk/builder/extra/cluster-home/lib/ruby/tungsten
+svn export  svn+ssh://svn.continuent.com/svnroot/tungsten-replicator/trunk/builder/extra/cluster-home/lib/ruby/tungsten
 
 rm -f ./iniparse.rb
-svn export https://tungsten-replicator.googlecode.com/svn/trunk/builder/extra/cluster-home/lib/ruby/iniparse.rb
+svn export  svn+ssh://svn.continuent.com/svnroot/tungsten-replicator/trunk/builder/extra/cluster-home/lib/ruby/iniparse.rb
 rm -rf ./iniparse
-svn export https://tungsten-replicator.googlecode.com/svn/trunk/builder/extra/cluster-home/lib/ruby/iniparse 
+svn export  svn+ssh://svn.continuent.com/svnroot/tungsten-replicator/trunk/builder/extra/cluster-home/lib/ruby/iniparse 
