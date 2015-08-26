@@ -15,13 +15,9 @@
 # Initial developer(s): Jeff Mace
 # Contributor(s):
 
-# Extract the required libraries from 
-# https://code.google.com/p/tungsten-replicator/
-`#{File.dirname(__FILE__)}/export-from-trunk.sh`
-
 Gem::Specification.new do |s|
   s.name        = 'continuent-tools-core'
-  s.version     = '0.10.0'
+  s.version     = '0.10.5'
   s.date        = Date.today.to_s
   s.summary     = "Continuent Tungsten tools core functions"
   s.authors     = ["Continuent"]
