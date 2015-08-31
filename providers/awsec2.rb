@@ -29,6 +29,7 @@ class AWSEC2TungstenDirectoryProvider < TungstenDirectoryProvider
     
     unless defined?(AWS)
       begin
+        gem 'aws-sdk', '>=1.14.0', '<2.0.0'
         require 'aws/ec2'
       rescue LoadError
         raise "The aws-sdk Ruby gem or rubygem-aws-sdk package is required for this class"
