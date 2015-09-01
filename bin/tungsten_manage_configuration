@@ -1,0 +1,1654 @@
+#!/usr/bin/env ruby
+# Copyright (C) 2014 Continuent, Inc.
+# 
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License.  You may obtain
+# a copy of the License at
+# 
+#         http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+# License for the specific language governing permissions and limitations
+# under the License.
+#
+# Initial developer(s): Jeff Mace
+# Contributor(s):
+
+begin
+  require 'rubygems'
+  gem 'continuent-tools-core'
+rescue LoadError
+end
+
+require 'continuent-tools-core'
+require 'digest/md5'
+
+class TungstenManageConfiguration
+  include TungstenScript
+  private
+  
+  SERVER_TYPE = "tungsten-ServerType"
+  CLUSTER_NAME = "tungsten-ClusterName"
+  COMPOSITE_CLUSTER_NAME = "tungsten-CompositeClusterName"
+  COMPOSITE_CLUSTER_MASTER = "tungsten-CompositeClusterMaster"
+  ARCHIVE_CLUSTERS = "tungsten-ArchiveClusters"
+  CONNECTOR_CLUSTERS = "tungsten-ConnectorClusters"
+  CLUSTER_PASSIVE_WITNESS = "tungsten-PassiveWitness"
+  
+  def main
+    directory_entries = load_directory_entries()
+    entry = directory_entries[opt(:hostname)]
+    if entry == nil
+      raise MessageError.new("Unable to find a directory entry for '#{opt(:hostname)}'")
+    end
+    
+    validate_entry(entry)
+    unless TU.is_valid?()
+      return
+    end
+    
+    services = generate_services_map(directory_entries)
+    unless TU.is_valid?()
+      return
+    end
+    
+    case command()
+    when "install"
+      install_entry(services, entry, directory_entries)
+    when "uninstall"
+      uninstall_entry(entry)
+    when "repair"
+      repair_entry(entry)
+    when "lastrun"
+      if File.exists?(opt(:lastrun))
+        File.open(opt(:lastrun), "r") {
+          |f|
+          TU.output(f.read().chomp())
+        }
+      else
+        TU.output("-1")
+      end
+    when "ini"
+      entry_services = filter_services_map(services, entry)
+      pending_ini = write_ini_configuration(entry_services, entry)
+      pending_ini.rewind()
+      TU.output(pending_ini.read())
+    when "hosts"
+      entry_services = filter_services_map(services, entry)
+      hostsmap = generate_hosts_map(entry_services, directory_entries, entry["location"])
+      hostsmap.keys().sort().each{
+        |h|
+        TU.output("#{hostsmap[h]}\t#{h}")
+      }
+    when "hosts_puppet_manifest"
+      entry_services = filter_services_map(services, entry)
+      hostsmap = generate_hosts_map(entry_services, directory_entries, entry["location"])
+      TU.output(generate_hosts_puppet_manifest(hostsmap))
+    end
+  end
+  
+  # Write the tungsten.ini configuration and install/update all needed
+  # software packages. Automatically detect the correct master and provision
+  # the server if it is a slave.
+  def install_entry(services, entry, directory_entries)
+    call_hook(:hook_before_install)
+    
+    # Eliminate services not related to the current entry and write to INI
+    entry_services = filter_services_map(services, entry)
+    pending_ini = write_ini_configuration(entry_services, entry)
+    
+    # Parse and validate the INI contents as a hash instead of raw content
+    pending_contents = TU.parse_ini_file(pending_ini.path())
+    validate_pending_ini_contents(entry, pending_contents)
+    unless TU.is_valid?()
+      return
+    end
+    
+    # Parse the original contents before the file is replaced
+    if File.exists?(opt(:outputfile))
+      initial_contents = TU.parse_ini_file(opt(:outputfile))
+    else
+      initial_contents = {}
+    end
+    
+    # Check the status of the last time the script was run
+    if opt(:lastrun) != nil && File.exist?(opt(:lastrun))
+      lastrun = File.open(opt(:lastrun), "r").read().chomp()
+    else
+      lastrun = nil
+    end
+
+    # returns true if opt(:outputfile) was actually modified
+    file_replaced = replace_managed_file(opt(:outputfile), pending_ini)
+    
+    # We only need to update the software configuration if 
+    # - there were configuration changes
+    # - if the user requested it with --replace-release
+    # - if the last run was not successful
+    apply_changes = false
+    if file_replaced == true
+      apply_changes = true
+    elsif opt(:replace_release) == true
+      apply_changes = true
+    elsif lastrun != nil && lastrun != "0"
+      apply_changes = true
+    end
+    
+    if apply_changes == true
+      enable_script_log()
+      
+      # If enabled, update /etc/hosts with any available directory entries
+      case opt(:manage_etc_hosts)
+      when "puppet"
+        hostsmap = generate_hosts_map(entry_services, directory_entries, entry["location"])
+        manifest = Tempfile.new('tmcmanifest')
+        manifest.puts(generate_hosts_puppet_manifest(hostsmap))
+        manifest.flush()
+        TU.cmd_result("cat #{manifest.path} | sudo puppet apply")
+      end
+      
+      # Install or Update Continuent Tungsten from the configured path
+      if entry_is_type?(entry, ["datasource", "connector"])
+        update_continuent_tungsten(entry, initial_contents, pending_contents)
+      end
+      
+      # Install or Update Tungsten Replicator from the configured path
+      if entry_is_type?(entry, "archive")
+        update_tungsten_replicator(entry, initial_contents, pending_contents)
+      end
+    end
+    
+    # This section is not linked to changes in the INI file because it
+    # is used to reload the users.map file. Changes in the two are not tied
+    # to each other.
+    if entry_is_type?(entry, "connector")
+      update_usersmap(entry, entry_services.keys())
+    end
+    
+    call_hook(:hook_after_install)
+  end
+  
+  def update_continuent_tungsten(entry, initial_contents, new_contents)
+    home = opt(:continuent_tungsten_home)
+    TU.mkdir_if_absent("#{home}/service_logs")
+    tpmlog = "#{home}/service_logs/tungsten-configure.log"
+    hook_arguments = []
+    hook_arguments << "--continuent-tungsten-home=#{home}"
+    
+    if File.exists?("#{home}/tungsten")
+      install = TungstenInstall.new("#{home}/tungsten")
+      migrate_schema = false
+      current_schema = nil
+      target_schema = nil
+      
+      new_clusters = nil
+      new_members = nil
+      removed_clusters = nil
+      removed_members = nil
+      
+      if entry_is_type?(entry, "datasource")
+        # Calculate new or removed members and clusters so we can take
+        # the appropriate action
+        new_clusters, new_members = find_cluster_differences(new_contents, initial_contents)
+        removed_clusters, removed_members = find_cluster_differences(initial_contents, new_contents)
+
+        if new_clusters != nil
+          TU.debug("New clusters: #{new_clusters.join(',')}")
+          new_clusters.each{
+            |cluster|
+            hook_arguments << "--add-cluster=#{cluster}"
+          }
+        end
+        if removed_clusters != nil
+          TU.debug("Removed clusters: #{removed_clusters.join(',')}")
+          removed_clusters.each{
+            |cluster|
+            hook_arguments << "--remove-cluster=#{cluster}"
+          }
+        end
+        if new_members != nil
+          new_members.each{
+            |svc, members|
+            if members.size() == 0
+              next
+            end
+            TU.debug("New #{svc} members: #{members.join(',')}")
+            members.each{
+              |member|
+              hook_arguments << "--add-member=#{svc}.#{member}"
+            }
+          }
+        end
+        if removed_members != nil
+          removed_members.each{
+            |svc, members|
+            if members.size() == 0
+              next
+            end
+            TU.debug("Removed #{svc} members: #{members.join(',')}")
+            members.each{
+              |member|
+              hook_arguments << "--remove-member=#{svc}.#{member}"
+            }
+          }
+        end
+      end
+      
+      begin
+        if entry["tags"][COMPOSITE_CLUSTER_NAME].to_s() != ""
+          # Check if the service is currently writing to the composite service schema
+          current_schema = install.setting(install.setting_key(REPL_SERVICES, entry["tags"][CLUSTER_NAME], "repl_svc_schema"))
+          target_schema = "tungsten_#{TU.to_identifier(entry["tags"][COMPOSITE_CLUSTER_NAME])}"
+          
+          if current_schema != target_schema
+            TU.notice("Migrate the #{current_schema} schema to #{target_schema}")
+            migrate_schema = true
+            
+            # Shutdown the replicator while we migrate the schema and then 
+            # upgrade Continuent Tungsten. It needs to be stopped instead of
+            # put OFFLINE so the manager does not put it ONLINE.
+            TU.cmd_result("#{home}/tungsten/tungsten-replicator/bin/replicator stop")
+            TU.tungsten_cmd_result("tungsten_migrate_schema --from-schema=#{current_schema} --to-schema=#{target_schema} --drop-target-schema=true")
+          end
+        end
+      rescue CommandError => ce
+        TU.debug(ce)
+        
+        # Make sure the replicator is restarted if we are cancelling the script
+        TU.cmd_result("#{home}/tungsten/tungsten-replicator/bin/replicator start")
+        
+        raise "Unable to update Continuent Tungsten to a composite cluster because of issues migrating the tracking schema."
+      end
+
+      begin
+        replace_release = false
+        if migrate_schema == true
+          TU.debug("Force `tpm update --replace-release` due to a new composite cluster")
+          replace_release = true
+        end
+        
+        call_hook(:hook_before_ct_update, hook_arguments)
+        if replace_release == true
+          TU.notice("Update #{home}/tungsten and replace release directory")
+          TU.cmd_result("#{opt(:continuent_tungsten_package)}/tools/tpm update --replace-release --tty --log=#{tpmlog}")
+        else
+          TU.notice("Update #{home}/tungsten")
+          TU.cmd_result("#{opt(:continuent_tungsten_home)}/tungsten/tools/tpm update --tty --log=#{tpmlog}")
+        end
+        call_hook(:hook_after_ct_update, hook_arguments)
+      rescue CommandError => ce
+        TU.debug(ce)
+        raise "Unable to update Continuent Tungsten check #{tpmlog} for more information"
+      ensure
+        if migrate_schema == true
+          # Restart the replicator after shutting it down for the schema migration
+          TU.cmd_result("#{home}/tungsten/tungsten-replicator/bin/replicator start")
+        end
+      end
+    else
+      begin
+        call_hook(:hook_before_ct_install, hook_arguments)
+        TU.notice("Install #{opt(:continuent_tungsten_package)}")
+        TU.cmd_result("#{opt(:continuent_tungsten_package)}/tools/tpm install --tty --log=#{tpmlog}")
+        call_hook(:hook_after_ct_install, hook_arguments)
+      rescue CommandError => ce
+        TU.debug(ce)
+        raise "Unable to install Continuent Tungsten check #{tpmlog} for more information"
+      end
+      
+      if entry_is_type?(entry, "datasource")
+        provision_cluster_replicator(home, entry)
+      end
+      
+      TU.notice("Start Continuent Tungsten")
+      begin
+        cmd = "#{home}/tungsten/cluster-home/bin/startall"
+        TU.cmd_result(cmd)
+      rescue CommandError => ce
+        raise "There was an error running `#{cmd}`."
+      end
+    end
+  end
+  
+  def update_tungsten_replicator(entry, initial_contents, new_contents)
+    home = opt(:tungsten_replicator_home)
+    TU.mkdir_if_absent("#{home}/service_logs")
+    tpmlog = "#{home}/service_logs/tungsten-configure.log"
+    hook_arguments = []
+    hook_arguments << "--tungsten-replicator-home=#{home}"
+    
+    if File.exists?("#{home}/tungsten")
+      begin
+        call_hook(:hook_before_tr_update, hook_arguments)
+        TU.notice("Update #{home}/tungsten")
+        TU.cmd_result("#{opt(:tungsten_replicator_home)}/tungsten/tools/tpm update --tty --log=#{tpmlog}")
+        call_hook(:hook_after_tr_update, hook_arguments)
+      rescue CommandError => ce
+        TU.debug(ce)
+        raise "Unable to update Tungsten Replicator check #{tpmlog} for more information"
+      end
+    else
+      begin
+        call_hook(:hook_before_tr_install, hook_arguments)
+        TU.notice("Install #{opt(:tungsten_replicator_package)}")
+        TU.cmd_result("#{opt(:tungsten_replicator_package)}/tools/tpm install --tty --log=#{tpmlog}")
+        call_hook(:hook_after_tr_install, hook_arguments)
+      rescue CommandError => ce
+        TU.debug(ce)
+        raise "Unable to install Tungsten Replicator check #{tpmlog} for more information"
+      end
+      
+      unless entry_is_type?(entry, "datasource")
+        entry["tags"][ARCHIVE_CLUSTERS].each{
+          |svc|
+          # TODO : Provision logically for each remote service
+          # provision_archive_replicator(home, entry, svc)
+        }
+      end
+      
+      TU.notice("Start Tungsten Replicator")
+      begin
+        cmd = "#{home}/tungsten/cluster-home/bin/startall"
+        TU.cmd_result(cmd)
+      rescue CommandError => ce
+        raise "There was an error running `#{cmd}`."
+      end
+    end
+  end
+  
+  # Identify if this server should be started as a slave to an existing
+  # master or relay server. If a valid master or relay, can't be found
+  # the replicator will be started with its default role.
+  def provision_cluster_replicator(home, entry)
+    install = TungstenInstall.new("#{home}/tungsten")
+    
+    # What is the role we will assign to this replicator
+    role = nil
+    # What is the default role of this replicator
+    default_role = install.setting(install.setting_key(REPL_SERVICES, install.default_dataservice(), "repl_role"))
+    
+    # The THL URI to use when the role will be changed to slave
+    master_listen_uri = nil
+    # Command used to identify the master listen uri on a remote replicator
+    masterListenUriCommand = "#{install.base_path()}/tungsten-replicator/bin/trepctl properties -filter replicator.master.listen.uri -values"
+    
+    # A valid host that can be used in the tungsten_provision_slave command
+    provision_source = nil
+    
+    # Collect the current state from all other members and identify if there 
+    # is already a valid master or relay server the cluster.
+    master = nil
+    relay = nil
+    
+    service_members = install.setting(install.setting_key(DATASERVICES, install.default_dataservice(), "dataservice_hosts")).split(",")
+    service_members.each{
+      |member|
+      if member == opt(:hostname)
+        next
+      end
+      
+      begin
+        # Get the cctrl contents in a JSON object
+        contents = nil
+        Timeout.timeout(15) {
+          contents = TU.ssh_result("if [ -f #{install.base_path()}/tools/tpm ]; then #{install.base_path()}/tools/tpm cctrl; else echo \"\"; fi", member, install.user())
+        }
+        
+        result = result = JSON.parse(contents)
+        if result.instance_of?(Hash)
+          values = result["#{TU.to_identifier(member)}:#{install.root()}"]
+          
+          if values == nil
+            TU.debug("Unable to find cctrl results for #{TU.to_identifier(member)}:#{install.root()}")
+            next
+          end
+          if values["manager_is_running"] != "true"
+            TU.debug("Skipping this member because the manager is not running")
+            next
+          end
+          
+          # Only one member of the cluster should be a coordinator so we 
+          # use that to make sure we are looking at the correct output. 
+          # In some corner cases, there may be multiple coordinators. In the 
+          # event that this happens and each gives a different state, the 
+          # script will throw an error.
+          if values["cctrl"]["coordinator"]["host"] != member
+            TU.debug("Skipping this member because it is not the coordinator")
+            next
+          end
+          if values["cctrl"]["coordinator"]["state"] != "ONLINE"
+            TU.debug("Skipping this member because the coordinator is not ONLINE")
+            next
+          end
+          
+          # Go through each datasource to find the ONLINE master or relay
+          values["cctrl"]["datasources"].each{
+            |ds, ds_values|
+            if ds == opt(:hostname)
+              TU.debug("Skip the #{ds} datasource because it is the current host")
+              next
+            end
+            
+            if ds_values["role"] != ds_values["replicator"]["role"]
+              TU.debug("Skip the #{ds} datasource because the replicator and datasource roles do not match")
+              next
+            end
+            
+            if ds_values["status"] != "ONLINE"
+              TU.debug("Skip the #{ds} datasource because it is not ONLINE")
+              next
+            end
+        
+            if ds_values["replicator"]["status"] != "ONLINE"
+              TU.debug("Skip the #{ds} datasource because the replicator is not ONLINE")
+              next
+            end
+            
+            if ds_values["role"] == "master"
+              if master == nil
+                master = ds
+              elsif master != ds
+                # There are multiple coordinators and they don't agree on the 
+                # current master.
+                throw "Unable to provision because both #{ds} and #{master} are listed as ONLINE master datasources"
+              end
+            elsif ds_values["role"] == "relay"
+              if relay == nil
+                relay = ds
+              elsif relay != ds
+                # There are multiple coordinators and they don't agree on the 
+                # current relay.
+                throw "Unable to provision because both #{ds} and #{relay} are listed as ONLINE relay datasources"
+              end
+            else
+              provision_source = ds
+            end
+          }
+
+        end
+      rescue JSON::ParserError
+      rescue CommandError
+      rescue RemoteCommandError
+      rescue MessageError => me
+      rescue Timeout::Error
+      end
+    }
+    
+    # Collect the THL URI from the server identified as a valid master or 
+    # relay. 
+    if master != nil
+      role = "slave"
+      master_listen_uri = TU.ssh_result(masterListenUriCommand, master, install.user())
+      
+      if provision_source == nil
+        provision_source = master
+      end
+    elsif relay != nil
+      role = "slave"
+      master_listen_uri = TU.ssh_result(masterListenUriCommand, relay, install.user())
+      
+      if provision_source == nil
+        provision_source = relay
+      end
+    end
+        
+    if role == "slave"
+      # Write the slave connection information to the dynamic properties file
+      dynamic_path = install.setting(install.setting_key(REPL_SERVICES, install.default_dataservice(), 'repl_svc_dynamic_config'))
+      if dynamic_path.to_s() == ""
+        raise "Unable to set the replication URI because the dynamic properties file could not be found."
+      end
+      File.open(dynamic_path, "w") {
+        |f|
+        f.puts("replicator.master.connect.uri=#{master_listen_uri}")
+        f.puts("replicator.role=slave")
+      }
+    elsif default_role == "master"
+      # Write the dynamic properties file so that any future runs
+      # of this script will not cause this replicator to change role.
+      dynamic_path = install.setting(install.setting_key(REPL_SERVICES, install.default_dataservice(), 'repl_svc_dynamic_config'))
+      if dynamic_path.to_s() == ""
+        raise "Unable to set the default role because the dynamic properties file could not be found."
+      end
+      File.open(dynamic_path, "w") {
+        |f|
+        f.puts("replicator.role=master")
+      }
+    elsif default_role == "relay"
+      master = nil
+      
+      composite_datasources = install.setting([DATASERVICES, entry["tags"][COMPOSITE_CLUSTER_NAME], "dataservice_composite_datasources"].join('.'))
+      composite_datasources.split(",").each{
+        |composite_ds|
+
+        # We don't need to continue after finding a master
+        if master_listen_uri != nil
+          next
+        end
+        
+        # Don't look in the local cluster because we've already checked for 
+        # valid datasources there
+        if composite_ds == entry["tags"][CLUSTER_NAME]
+          next
+        end
+        
+        service_members = install.setting([DATASERVICES, composite_ds, "dataservice_hosts"].join('.')).split(",")
+        service_members.each{
+          |member|
+          if member == opt(:hostname)
+            next
+          end
+
+          begin
+            # Get the cctrl contents in a JSON object
+            contents = nil
+            Timeout.timeout(15) {
+              contents = TU.ssh_result("if [ -f #{install.base_path()}/tools/tpm ]; then #{install.base_path()}/tools/tpm cctrl; else echo \"\"; fi", member, install.user())
+            }
+
+            result = result = JSON.parse(contents)
+            if result.instance_of?(Hash)
+              values = result["#{TU.to_identifier(member)}:#{install.root()}"]
+
+              if values == nil
+                TU.debug("Unable to find cctrl results for #{TU.to_identifier(member)}:#{install.root()}")
+                next
+              end
+              if values["manager_is_running"] != "true"
+                TU.debug("Skipping this member because the manager is not running")
+                next
+              end
+
+              # Only one member of the cluster should be a coordinator so we 
+              # use that to make sure we are looking at the correct output. 
+              # In some corner cases, there may be multiple coordinators. In the 
+              # event that this happens and each gives a different state, the 
+              # script will throw an error.
+              if values["cctrl"]["coordinator"]["host"] != member
+                TU.debug("Skipping this member because it is not the coordinator")
+                next
+              end
+              if values["cctrl"]["coordinator"]["state"] != "ONLINE"
+                TU.debug("Skipping this member because the coordinator is not ONLINE")
+                next
+              end
+
+              # Go through each datasource to find the ONLINE master or relay
+              values["cctrl"]["datasources"].each{
+                |ds, ds_values|
+                if ds == opt(:hostname)
+                  TU.debug("Skip the #{ds} datasource because it is the current host")
+                  next
+                end
+
+                if ds_values["role"] != ds_values["replicator"]["role"]
+                  TU.debug("Skip the #{ds} datasource because the replicator and datasource roles do not match")
+                  next
+                end
+
+                if ds_values["status"] != "ONLINE"
+                  TU.debug("Skip the #{ds} datasource because it is not ONLINE")
+                  next
+                end
+
+                if ds_values["replicator"]["status"] != "ONLINE"
+                  TU.debug("Skip the #{ds} datasource because the replicator is not ONLINE")
+                  next
+                end
+
+                if ds_values["role"] == "master"
+                  if master == nil
+                    master = ds
+                  elsif master != ds
+                    # There are multiple coordinators and they don't agree on the 
+                    # current master.
+                    throw "Unable to provision because both #{ds} and #{master} are listed as ONLINE master datasources"
+                  end
+                else
+                  provision_source = ds
+                end
+              }
+
+            end
+          rescue JSON::ParserError
+          rescue CommandError
+          rescue RemoteCommandError
+          rescue MessageError => me
+          rescue Timeout::Error
+          end
+        }
+      }
+    
+      if master == nil
+        # There is no master so there is no clear decision that we can make
+        return
+      end
+      
+      master_listen_uri = TU.ssh_result(masterListenUriCommand, master, install.user())
+      
+      if provision_source == nil
+        provision_source = master
+      end
+    
+      # Write the slave connection information to the dynamic properties file
+      dynamic_path = install.setting(install.setting_key(REPL_SERVICES, install.default_dataservice(), 'repl_svc_dynamic_config'))
+      if dynamic_path.to_s() == ""
+        raise "Unable to set the replication URI because the dynamic properties file could not be found."
+      end
+      File.open(dynamic_path, "w") {
+        |f|
+        f.puts("replicator.master.connect.uri=#{master_listen_uri}")
+        f.puts("replicator.role=relay")
+      }
+    end
+
+    if provision_source != nil
+      TU.notice("Provisioning the server. This may take some time.")
+      begin
+        TU.tungsten_cmd_result("#{home}/tungsten/tungsten-replicator/scripts/tungsten_provision_slave --source=#{provision_source} #{opt(:provision_slave_arguments)}")
+      rescue CommandError => ce
+        TU.debug(ce)
+        raise "Unable to provision #{entry["hostname"]}. Review the log for more information."
+      end
+    else
+      TU.debug("Skipping the provision step because there is no clear provision source")
+    end
+  end
+  
+  def update_usersmap(entry, service_list)
+    home = opt(:continuent_tungsten_home)
+    if File.exists?("#{home}/tungsten")
+      begin
+        usersmap = "#{home}/tungsten/tungsten-connector/conf/user.map"
+        if File.exists?(usersmap)
+          # Ensure that the users.map file has not been modified manually
+          validate_managed_file(usersmap, true)
+        end
+        
+        # Generate a new users.map file and replace the old one if different
+        pending_usersmap = write_usersmap(service_list, entry)
+        if pending_usersmap != false
+          file_replaced = replace_managed_file(usersmap, pending_usersmap)
+        else
+          TU.debug("Skipping user.map management because no users templates were found")
+        end
+      rescue MessageError => me
+        TU.error(me.message)
+      end
+    end
+  end
+  
+  def uninstall_entry(entry)
+    enable_script_log()
+    call_hook(:hook_before_uninstall)
+    
+    if entry_is_type?(entry, ["datasource", "connector"])
+      begin
+        TU.notice("Uninstall #{opt(:continuent_tungsten_package)}")
+        TU.cmd_result("#{opt(:continuent_tungsten_package)}/tools/tpm uninstall --i-am-sure")
+      rescue CommandError => ce
+        TU.debug(ce)
+        TU.warning "Unable to uninstall Continuent Tungsten. Proceeding with uninstall of other components."
+      end
+    end
+    
+    if entry_is_type?(entry, "archive")
+      begin
+        TU.notice("Uninstall #{opt(:tungsten_replicator_package)}")
+        TU.cmd_result("#{opt(:tungsten_replicator_package)}/tools/tpm uninstall --i-am-sure")
+      rescue CommandError => ce
+        TU.debug(ce)
+        TU.warning "Unable to uninstall Tungsten Replicator. Proceeding with uninstall of other components."
+      end
+    end
+    
+    TU.cmd_result("rm -f #{opt(:outputfile)}", true)
+    TU.cmd_result("rm -f #{get_original_file(opt(:outputfile))}", true)
+    call_hook(:hook_after_uninstall)
+  end
+  
+  # Calculate the hostnames needed to run the listed services
+  # For each hostname include the private address if the host location
+  # matches the given location. Use the public address if there is no private
+  # address or the locations do not match.
+  def generate_hosts_map(services, directory_entries, location)
+    hosts_map = {}
+    
+    services.each{
+      |key,service|
+      if service.has_key?("members") && service["members"].is_a?(Array)
+        service["members"].each{
+          |hostname|
+          entry = directory_entries[hostname]
+          if entry == nil
+            TU.error("Unable to find a directory entry for #{hostname}")
+            next
+          end
+          
+          if entry["location"] == location
+            if entry.has_key?("private-address")
+              hosts_map[hostname] = entry["private-address"]
+            elsif entry.has_key?("public-address")
+              hosts_map[hostname] = entry["public-address"]
+            else
+              TU.error("Unable to find a private or public address for #{hostname}")
+            end
+          else
+            if entry.has_key?("public-address")
+              hosts_map[hostname] = entry["public-address"]
+            else
+              TU.error("Unable to find a public address for #{hostname}")
+            end
+          end
+        }
+      end
+    }
+    
+    return hosts_map
+  end
+  
+  def generate_hosts_puppet_manifest(hostsmap)
+    manifest = []
+    hostsmap.keys().sort().each{
+      |h|
+      manifest << "host { '#{h}' : ip => '#{hostsmap[h]}', comment => 'Created by #{script_name()}'}"
+    }
+    manifest.join("\n")
+  end
+  
+  # TODO : Add a 'repair' command that will reprovision or change the slave URI
+  def repair_entry(entry)
+    raise "The repair command is currently not supported"
+  end
+  
+  # Returns a parsed version of the output from tungsten_directory
+  def load_directory_entries
+    begin
+      json = TU.cmd_result("tungsten_directory")
+    rescue CommandError => ce
+      raise MessageError.new("Unable to manage configuration because the tungsten_directory command failed")
+    end
+    
+    begin
+      entries = JSON.parse(json)
+    rescue
+      entries = nil
+    end
+    
+    unless entries.is_a?(Hash)
+      raise MessageError.new("Unable to manage configuration because the tungsten_directory command did not return valid JSON")
+    end
+    
+    return entries
+  end
+  
+  # Return clusters and cluster members that exist in a but not b
+  def find_cluster_differences(a, b)
+    clusters = []
+    members = {}
+    
+    unless a.is_a?(Hash)
+      return
+    end
+    
+    a.keys().each{
+      |svc|
+      if svc =~ /^defaults/
+        next
+      end
+      
+      unless a[svc]["topology"] == "clustered"
+        next
+      end
+      
+      if b.is_a?(Hash) && b.has_key?(svc)
+        if b[svc]["topology"] != "clustered"
+          TU.error("Unable to convert non-clustered #{svc} into a cluster")
+        else
+          members[svc] = a[svc]["members"].split(",") - b[svc]["members"].split(",")
+        end
+      else
+        clusters << svc
+      end
+    }
+    
+    return clusters,members
+  end
+  
+  # Take the information from tungsten_directory and turn it into
+  # a set of cluster data that could be written to the INI file
+  def generate_services_map(entries)
+    map = {}
+    is_valid = true
+    
+    entries.each{
+      |k,entry|
+      types = entry["tags"][SERVER_TYPE]
+      unless types.is_a?(Array)
+        types = [types]
+      end
+      
+      types.each{
+        |type|
+        begin
+          case type
+          when "datasource"
+            generate_datasource_services_map(map, entry)
+          when "witness"
+            generate_witness_services_map(map, entry)
+          when "connector"
+            generate_connector_services_map(map, entry)
+          when "archive"
+            generate_archive_services_map(map, entry)
+          else
+            raise MessageError.new("Unable to process a #{SERVER_TYPE} of #{type} for #{entry["hostname"]}")
+          end
+        rescue MessageError => me
+          is_valid = false
+          TU.error(me.message)
+        end
+      }
+    }
+    
+    unless is_valid == true
+      raise MessageError.new("Unable to proceed due to issues with the directory entries")
+    end
+    
+    map
+  end
+  
+  def generate_datasource_services_map(map, entry)
+    svc = entry["tags"][CLUSTER_NAME]
+    if svc.to_s() == ""
+      raise MessageError.new "Unable to create the cluster on #{entry['hostname']} because it does not have a value for the '#{CLUSTER_NAME}' tag."
+    end
+    
+    unless map.has_key?(svc)
+      map[svc] = {}
+      map[svc]["skip-validation-check"] = ["ManagerWitnessNeededCheck"]
+    end
+    unless map[svc].has_key?("members")
+      map[svc]["members"] = []
+    end
+    
+    # Initiate the cluster
+    map[svc]["topology"] = "clustered"
+    
+    # Add the host to the cluster
+    map[svc]["members"] << entry["hostname"]
+    map[svc]["members"].uniq!()
+    map[svc]["members"].sort!()
+    
+    composite_svc = entry["tags"][COMPOSITE_CLUSTER_NAME]
+    if composite_svc.to_s() != ""
+      unless map.has_key?(composite_svc)
+        map[composite_svc] = {}
+      end
+      unless map[composite_svc].has_key?("composite-datasources")
+        map[composite_svc]["composite-datasources"] = []
+      end
+      
+      # Add this cluster to the composite cluster
+      map[composite_svc]["composite-datasources"] << svc
+      
+      # Define the replication relay source for this cluster
+      composite_master = entry["tags"][COMPOSITE_CLUSTER_MASTER]
+      if composite_master.to_s() == ""
+        raise MessageError.new "Unable to create the '#{composite_svc}' composite cluster because #{entry['hostname']} does not define the '#{COMPOSITE_CLUSTER_MASTER}' tag."
+      end
+      
+      # Set relay-source if this cluster is not the master
+      # Throw an error if another cluster has specified a different
+      # composite cluster master
+      unless map[svc].has_key?("relay-source")
+        unless composite_master == svc
+          map[svc]["relay-source"] = composite_master
+        end
+      else
+        if composite_master != map[svc]["relay-source"]
+          raise MessageError.new "Unable to create the '#{composite_svc}' composite cluster because #{entry['hostname']} defines a different '#{COMPOSITE_CLUSTER_MASTER}' than other hosts."
+        end
+      end
+    end
+    
+    # Only use the passive witness if it was defined for this host
+    # The check makes sure that entry is the directory entry for the current host
+    if entry["hostname"] == opt(:hostname)
+      if entry["tags"][CLUSTER_PASSIVE_WITNESS].to_s() != ""
+        map[svc]["passive-witness"] = entry["tags"][CLUSTER_PASSIVE_WITNESS]
+      end
+    end
+  end
+  
+  def generate_witness_services_map(map, entry)
+    svc = entry["tags"][CLUSTER_NAME]
+    if svc.to_s() == ""
+      raise MessageError.new "Unable to create the cluster on #{entry['hostname']} because it does not have a value for the '#{CLUSTER_NAME}' tag."
+    end
+    
+    unless map.has_key?(svc)
+      map[svc] = {}
+    end
+
+    # Initiate the cluster
+    map[svc]["topology"] = "clustered"
+    
+    map[svc]["active-witness"] = entry["hostname"]
+  end
+  
+  def generate_connector_services_map(map, entry)
+    services = entry["tags"][CONNECTOR_CLUSTERS]
+    if services.to_s() == ""
+      services = entry["tags"][CLUSTER_NAME]
+    end
+    if services.to_s() == ""
+      raise MessageError.new "Unable to create the connector on #{entry['hostname']} because it does not have a value for the '#{CONNECTOR_CLUSTERS}' tag."
+    end
+    
+    unless services.is_a?(Array)
+      services = services.split(",")
+    end
+    services.each{
+      |svc|
+      unless map.has_key?(svc)
+        map[svc] = {}
+      end
+      unless map[svc].has_key?("connectors")
+        map[svc]["connectors"] = []
+      end
+      
+      # Add this host to each cluster
+      map[svc]["connectors"] << entry["hostname"]
+    }
+  end
+  
+  def generate_archive_services_map(map, entry)
+    services = entry["tags"][ARCHIVE_CLUSTERS]
+    if services.to_s() == ""
+      raise MessageError.new "Unable to create the archive replicator on #{entry['hostname']} because it does not have a value for the '#{ARCHIVE_CLUSTERS}' tag."
+    end
+    
+    unless services.is_a?(Array)
+      services = services.split(",")
+    end
+    services.each{
+      |svc|
+      svc_alias = "#{svc}_slave"
+      unless map.has_key?(svc_alias)
+        map[svc_alias] = {}
+      end
+      unless map[svc_alias].has_key?("members")
+        map[svc_alias]["members"] = []
+      end
+      
+      # Initiate the cluster-slave service
+      map[svc_alias]["master-dataservice"] = svc
+      map[svc_alias]["topology"] = "cluster-slave"
+      
+      # Add this host to the list of servers that is 
+      # replicating from the cluster
+      map[svc_alias]["members"] << entry["hostname"]
+    }
+  end
+  
+  # Remove any services that aren't required for the given entry
+  def filter_services_map(map, entry)
+    # Filter the services down to the services that are needed to configure 
+    # this server
+    allowed_services = []
+    # - Services it is a member or connector of
+    unless entry["tags"][CLUSTER_NAME].to_s() == ""
+      allowed_services << entry["tags"][CLUSTER_NAME].to_s()
+    end
+    services = entry["tags"][CONNECTOR_CLUSTERS]
+    unless services.to_s() == ""
+      unless services.is_a?(Array)
+        services = services.split(",")
+      end
+      services.each{
+        |svc|
+        allowed_services << svc
+      }
+    end
+    
+    # - Services that are part of its composite cluster
+    unless entry["tags"][COMPOSITE_CLUSTER_NAME].to_s() == ""
+      allowed_services << entry["tags"][COMPOSITE_CLUSTER_NAME].to_s()
+      allowed_services = allowed_services + 
+        map[entry["tags"][COMPOSITE_CLUSTER_NAME].to_s()]["composite-datasources"]
+    end
+    # - Services that it replicates from
+    services = entry["tags"][ARCHIVE_CLUSTERS]
+    unless services.to_s() == ""
+      unless services.is_a?(Array)
+        services = services.split(",")
+      end
+      services.each{
+        |svc|
+        allowed_services << svc
+        allowed_services << "#{svc}_slave"
+      }
+    end
+    
+    # Remove any services that aren't needed
+    map.delete_if {
+      |k,v|
+      (allowed_services.include?(k) == false)
+    }
+    
+    map.keys().each{
+      |svc|
+      # The cluster-slave topology just needs to know about itself
+      # Including other entries may cause extra replicator restarts
+      if map[svc]["topology"] == "cluster-slave"
+        map[svc]["members"].delete_if{|v| v != entry["hostname"]}
+      elsif map[svc]["topology"] == "clustered"
+        # Pick a default master for this dataservice using the first member 
+        # when sorted alphabetically. The role may be charged when Continuent 
+        # is started the first time if another member is already running as 
+        # the master. 
+        map[svc]["master"] = map[svc]["members"].sort()[0]
+        
+        if map[svc].has_key?("active-witness")
+          map[svc]["witnesses"] = map[svc]["active-witness"]
+          map[svc]["enable-active-witnesses"] = "true"
+          
+          map[svc]["members"] = map[svc]["members"] << map[svc]["active-witness"]
+          map[svc]["members"] = map[svc]["members"].uniq().sort()
+        else
+          members_count = map[svc]["members"].size()
+          even_members = (members_count % 2 == 0)
+          if even_members == true || members_count == 1
+            if map[svc].has_key?("passive-witness")
+              map[svc]["witnesses"] = map[svc]["passive-witness"]
+            end
+          end
+        end
+        
+        map[svc].delete("passive-witness")
+        map[svc].delete("active-witness")
+      end
+    }
+    
+    if map.keys().size() == 0
+      raise MessageError.new("Unable to manage configuration because there are no services defined for #{entry['hostname']}")
+    end
+    
+    return map
+  end
+  
+  # Create an INI file that is full sorted and optimized for the host
+  def write_ini_configuration(map, entry)
+    ini = Tempfile.new('tmcini')
+    ini.puts("# DO NOT MODIFY BY HAND")
+    ini.puts("# This file is managed by #{script_name()} for #{entry['hostname']}")
+    ini.puts("# Any manual changes to this file will disable script execution")
+    
+    @defaults_files.sort().each{
+      |path|
+      TU.parse_ini_file(path, false).each{
+        |section,values|
+        ini.puts("[#{section}]")
+        filter_defaults_values(values).each{
+          |value|
+          ini.puts(value)
+        }
+      }
+    }
+    
+    # Output each of the services with the keys sorted so they 
+    # come out in a consistent order
+    map.keys().sort().each{
+      |svc|
+      ini.puts("")
+      ini.puts("[#{svc}]")
+      
+      # Print all configuration values in a sorted order
+      map[svc].keys().sort().each{
+        |key|
+        value = map[svc][key]
+        if value.is_a?(Array)
+          value = value.uniq().sort().join(",")
+        end
+        
+        ini.puts("#{key}=#{value}")
+      }
+      
+      # Include additional service settings
+      path = "/etc/tungsten/service.#{svc}.tungsten.ini"
+      if File.exists?(path)
+        TU.parse_ini_file(path, false).each{
+          |section,values|
+          unless section == svc || section == "__anonymous__"
+            next
+          end
+          
+          filter_defaults_values(values).each{
+            |value|
+            ini.puts(value)
+          }
+        }
+      end
+    }
+    
+    ini.flush()
+    return ini
+  end
+  
+  def filter_defaults_values(values)
+    values.delete_if{
+      |v|
+      if v =~ /^start=/
+        true
+      elsif v =~ /^start-and-report=/
+        true
+      else
+        false
+      end
+    }
+  end
+  
+  def write_usersmap(service_list, entry)
+    usersmap = Tempfile.new('tmcusersmap')
+    usersmap.puts("# DO NOT MODIFY BY HAND")
+    usersmap.puts("# This file is managed by #{script_name()} for #{entry['hostname']}")
+    usersmap.puts("# Any manual changes to this file will disable script execution")
+    
+    users_found = false
+    search = ["defaults"] + service_list.sort()
+    search.each{
+      |svc|
+      path = "#{opt(:usersmap_templates_directory)}/users.#{svc}"
+      if File.exists?(path)
+        File.open(path, "r").each{
+          |line|
+          usersmap.puts(line.chomp())
+          users_found = true
+        }
+      end
+    }
+    
+    if users_found == false
+      return false
+    end
+    
+    usersmap.flush()
+    usersmap
+  end
+  
+  def configure
+    super()
+    
+    require_installed_directory?(false)
+    
+    add_option(:defaults, {
+      :on => "--defaults String",
+      :help => "Path to file containing the default sections of the tungsten.ini file",
+      :default => "/etc/tungsten/defaults.tungsten.ini"
+    })
+    
+    add_option(:outputfile, {
+      :on => "--output-file String",
+      :help => "Path to file containing the default sections of the tungsten.ini file",
+      :default => "/etc/tungsten/tungsten.ini"
+    })
+    
+    add_option(:hostname, {
+      :on => "--hostname String",
+      :help => "Write the INI file for this hostname",
+      :default => TU.hostname()
+    })
+    
+    add_option(:continuent_tungsten_package, {
+      :on => "--continuent-tungsten-package String",
+      :help => "Path to the Continuent Tungsten package to be installed"
+    })
+    
+    add_option(:tungsten_replicator_package, {
+      :on => "--tungsten-replicator-package String",
+      :help => "Path to the Tungsten Replicator package to be installed"
+    })
+    
+    add_option(:replace_release, {
+      :on => "--replace-release String",
+      :parse => method(:parse_boolean_option),
+      :help => "Force the script to run tpm update or install even if there are no changes to the INI file",
+    })
+    
+    add_option(:usersmap_templates_directory, {
+      :on => "--usersmap-templates-directory String",
+      :help => "Location to find templates for the users.map file",
+      :default => "/etc/tungsten/users"
+    })
+    
+    add_option(:log, {
+      :on => "--log String",
+      :help => "Log debug output to this file for every run that modifies system configuration",
+    })
+    
+    add_option(:lastrun, {
+      :on => "--lastrun String",
+      :help => "A file to store the exit code for the last run of this script",
+    })
+    
+    add_option(:manage_etc_hosts, {
+      :on => "--manage-etc-hosts String",
+      :help => "Update the hosts configuration during each run of #{script_name()}. Valid values: puppet."
+    })
+    
+    add_option(:provision_slave_arguments, {
+      :on => "--provision-slave-arguments String",
+      :help => "Additional arguments to pass along to the tungsten_provision_slave command"
+    })
+    
+    add_option(:hook_error, {
+      :on => "--hook-error String",
+      :help => "Call this script if the command does not finish successfully"
+    })
+    
+    add_option(:hook_before_install, {
+      :on => "--hook-before-install String",
+      :help => "Call this script before starting the install command"
+    })
+    
+    add_option(:hook_after_install, {
+      :on => "--hook-after-install String",
+      :help => "Call this script after starting the install command"
+    })
+    
+    add_option(:hook_before_uninstall, {
+      :on => "--hook-before-uninstall String",
+      :help => "Call this script before finishing the uninstall command"
+    })
+    
+    add_option(:hook_after_uninstall, {
+      :on => "--hook-after-uninstall String",
+      :help => "Call this script after finishing the uninstall command"
+    })
+    
+    add_option(:hook_before_ct_install, {
+      :on => "--hook-before-ct-install String",
+      :help => "Call this script before installing Continuent Tungsten"
+    })
+    
+    add_option(:hook_after_ct_install, {
+      :on => "--hook-after-ct-install String",
+      :help => "Call this script after installing Continuent Tungsten"
+    })
+    
+    add_option(:hook_before_ct_update, {
+      :on => "--hook-before-ct-update String",
+      :help => "Call this script before updating Continuent Tungsten"
+    })
+    
+    add_option(:hook_after_ct_update, {
+      :on => "--hook-after-ct-update String",
+      :help => "Call this script after updating Continuent Tungsten"
+    })
+    
+    add_option(:hook_before_tr_install, {
+      :on => "--hook-before-tr-install String",
+      :help => "Call this script before installing Tungsten Replicator"
+    })
+    
+    add_option(:hook_after_tr_install, {
+      :on => "--hook-after-tr-install String",
+      :help => "Call this script after installing Tungsten Replicator"
+    })
+    
+    add_option(:hook_before_tr_update, {
+      :on => "--hook-before-tr-update String",
+      :help => "Call this script before updating Tungsten Replicator"
+    })
+    
+    add_option(:hook_after_tr_update, {
+      :on => "--hook-after-tr-update String",
+      :help => "Call this script after updating Tungsten Replicator"
+    })
+    
+    add_command(:install, {
+      :help => "Write the INI configuration file and install/update software",
+      :default => true
+    })
+    
+    add_command(:uninstall, {
+      :help => "Remove managed software from this system"
+    })
+    
+    add_command(:repair, {
+      :help => "Look for issues with the current configuration and attempt to fix them"
+    })
+    
+    add_command(:lastrun, {
+      :help => "Output the exit code for the last run of #{script_name()}"
+    })
+    
+    add_command(:ini, {
+      :help => "Output the INI contents that would be written"
+    })
+    
+    add_command(:hosts, {
+      :help => "Output /etc/hosts entries for the directory hosts"
+    })
+    
+    add_command(:hosts_puppet_manifest, {
+      :help => "Output a Puppet manifest for the directory hosts"
+    })
+  end
+  
+  def validate
+    super()
+    
+    unless TU.is_valid?()
+      return TU.is_valid?()
+    end
+    
+    unless File.exists?("/etc/tungsten") && File.writable?("/etc/tungsten")
+      TU.error("The /etc/tungsten directory either does not exist or is not writeable")
+    end
+    
+    # Make sure that the tungsten.ini file is managed if it exists
+    if File.exists?(opt(:outputfile))
+      matched_lines = TU.cmd_result("grep #{script_name()} /etc/tungsten/tungsten.ini | wc -l", true)
+      if matched_lines.to_s() != "1"
+        TU.error("Unable to manage #{opt(:outputfile)} because it already exists and was not created by #{script_name()}")
+      else
+        begin
+          validate_managed_file(opt(:outputfile))
+        rescue MessageError => me
+          TU.error(me.message)
+        end
+      end
+    elsif require_directory_configuration?()
+      TU.error("Unable to run '#{command()}' because #{opt(:outputfile)} isn't managed by #{script_name()}")
+    end
+    
+    if require_valid_defaults_files?()
+      validate_defaults_files()
+    end
+    
+    case command()
+    when "install"
+      if opt(:continuent_tungsten_package) != nil
+        unless File.exists?(opt(:continuent_tungsten_package))
+          TU.error("Unable to find the Continuent Tungsten package at #{opt(:continuent_tungsten_package)}")
+        end
+      end
+    
+      if opt(:tungsten_replicator_package) != nil
+        unless File.exists?(opt(:tungsten_replicator_package))
+          TU.error("Unable to find the Tungsten Replicator package at #{opt(:tungsten_replicator_package)}")
+        end
+      end
+    when "lastrun"
+      if opt(:lastrun) == nil
+        TU.error("The 'lastrun' command is not supported because there is no configuration value for '--lastrun'.")
+      end
+    end
+  end
+  
+  def require_valid_defaults_files?()
+    case command()
+    when "install"
+      true
+    when "ini"
+      true
+    else
+      false
+    end
+  end
+  
+  def require_directory_configuration?()
+    case command()
+    when "uninstall"
+      true
+    when "repair"
+      true
+    else
+      false
+    end
+  end
+  
+  def manage_lastrun_file?()
+    case command()
+    when "install"
+      true
+    when "uninstall"
+      true
+    else
+      false
+    end
+  end
+  
+  def validate_defaults_files
+    @defaults_files = []    
+    Dir.glob(opt(:defaults)).each{
+      |f|
+      @defaults_files << f
+    }
+
+    if @defaults_files.size() == 0
+      TU.error("Unable to find any defaults files at #{opt(:defaults)}")
+    end
+  end
+  
+  # Check the server types for this host and validate we have enough information
+  def validate_entry(entry)
+    if entry_is_type?(entry, ["datasource", "connector"])
+      unless opt(:continuent_tungsten_package) != nil
+        TU.error("Unable to manage #{opt(:hostname)} because it includes the 'datasource' or 'connector' #{SERVER_TYPE} tag and no argument was given for --continuent-tungsten-package")
+      end
+    end
+    
+    if entry_is_type?(entry, "archive")
+      unless opt(:tungsten_replicator_package)
+        TU.error("Unable to manage #{opt(:hostname)} because it includes the 'archive' #{SERVER_TYPE} tag and no argument was given for --tungsten-replicator-package")
+      end
+    end
+  end
+  
+  def validate_pending_ini_contents(entry, pending_contents)
+    ini = Properties.new()
+    ini.props = pending_contents
+    
+    if entry_is_type?(entry, ["datasource", "connector"])
+      continuent_tungsten_home = ini.getProperty(["defaults", "home-directory"])
+      if continuent_tungsten_home == nil
+        continuent_tungsten_home = ini.getProperty(["defaults", "install-directory"])
+      end
+      if continuent_tungsten_home == nil
+        TU.error("Unable to manage #{opt(:hostname)} because it includes the 'datasource' or 'connector' #{SERVER_TYPE} tag but the INI defaults do not include a value for 'home-directory' under '[defaults]'.")
+      else
+        opt(:continuent_tungsten_home, continuent_tungsten_home)
+      end
+    end
+    
+    if entry_is_type?(entry, "datasource")
+      if File.exists?("#{opt(:continuent_tungsten_home)}/tungsten")
+        install = TungstenInstall.new("#{opt(:continuent_tungsten_home)}/tungsten")
+        
+        svc = install.setting("deployment_dataservice")
+        composite_svc = install.setting(install.setting_key("dataservices", svc, "dataservice_parent_dataservice"))
+        
+        pending_svc = entry["tags"][CLUSTER_NAME]
+        pending_composite_svc = entry["tags"][COMPOSITE_CLUSTER_NAME]
+        
+        if svc != pending_svc
+          TU.error("Unable to migrate the cluster name from #{svc} to #{pending_svc}")
+        end
+        
+        if composite_svc.to_s() != "" and composite_svc != pending_composite_svc
+          TU.error("Unable to migrate the composite cluster name from #{composite_svc} to #{pending_composite_svc}")
+        end
+      end
+    end
+    
+    if entry_is_type?(entry, "archive")
+      tungsten_replicator_home = ini.getProperty(["defaults.replicator", "home-directory"])
+      if tungsten_replicator_home == nil
+        tungsten_replicator_home = ini.getProperty(["defaults.replicator", "install-directory"])
+      end
+      if tungsten_replicator_home == nil
+        TU.error("Unable to manage #{opt(:hostname)} because it includes the 'archive' #{SERVER_TYPE} tag but the INI defaults do not include a value for 'home-directory' under '[defaults.replicator]'.")
+      else
+        opt(:tungsten_replicator_home, tungsten_replicator_home)
+      end
+      
+      if ini.getProperty(["defaults.replicator", "rmi-port"]) == nil
+        TU.error("Unable to manage #{opt(:hostname)} because it includes the 'archive' #{SERVER_TYPE} tag but the INI defaults do not include a value for 'rmi-port' under '[defaults.replicator]'.")
+      end
+    end
+  end
+  
+  def cleanup(code = 0)
+    if opt(:lastrun) != nil && manage_lastrun_file?()
+      begin
+        File.open(opt(:lastrun), "w") {
+          |f|
+          f.puts(code)
+        }
+      rescue => e
+        TU.exception(e)
+      end
+    end
+    
+    if code != 0
+      call_hook(:hook_error, ["--rc=#{code}"])
+    end
+    
+    super(code)
+  end
+  
+  def get_original_file(file)
+    File.dirname(file) + "/." + File.basename(file) + ".orig"
+  end
+  
+  # Validate that a managed file still matches the original version of it.
+  # The lack of an original file may be ignored if you want to takeover
+  # management of this file.
+  def validate_managed_file(file, ignore_missing_original = false)
+    # If it doesn't match .tungsten.ini.orig then changes have been made
+    original_file = get_original_file(file)
+    
+    if File.exists?(original_file)
+      begin
+        file_differences = TU.cmd_result("diff -u #{original_file} #{file}")
+        # No differences
+      rescue CommandError => ce
+        if ce.rc == 1
+          raise MessageError.new("Unable to manage #{file} because changes to it have been made manually")
+        else
+          raise ce
+        end
+      end
+    elsif ignore_missing_original == false
+      raise MessageError.new("Unable to manage #{file} because the tracking version #{original_file} is no longer available")
+    end
+  end
+  
+  # Take the new file for a given path and update the target file only
+  # if there is a change to it. Return true if the file was replaced, and
+  # false if no change was made.
+  def replace_managed_file(path, pending_file)
+    # Rewind and calculate the pending md5sum
+    pending_file.rewind()
+    pending_md5sum = Digest::MD5.hexdigest(pending_file.read())
+    
+    # Calculate the starting signature and contents of the INI file
+    initial_md5sum = nil
+    if File.exists?(path)
+      File.open(path, "r") {
+        |f|
+        initial_md5sum = Digest::MD5.hexdigest(f.read())
+      }
+    end
+
+    if initial_md5sum != pending_md5sum
+      enable_script_log()
+      
+      # Add a diff to the debug log for review purposes
+      TU.cmd_result("diff -u #{path} #{pending_file.path()}", true)
+    
+      TU.debug("Update the contents of #{path}")
+      FileUtils.cp(pending_file.path(), path)
+      FileUtils.cp(pending_file.path(), get_original_file(path))
+      
+      return true
+    else
+      TU.debug("There are no changes to #{path}")
+      
+      # Make sure the original file exists since a `tpm update` may not
+      # bring it across when upgrading versions.
+      unless File.exists?(get_original_file(path))
+        FileUtils.cp(path, get_original_file(path))
+      end
+
+      return false
+    end
+  end
+  
+  # Does the directory entry contain a matching ServerType
+  def entry_is_type?(entry, type)
+    unless entry["tags"].has_key?(SERVER_TYPE)
+      return false
+    else
+      unless type.is_a?(Array)
+        type = [type]
+      end
+      type.each{
+        |t|
+        if entry["tags"][SERVER_TYPE].include?(t)
+          return true
+        end
+      }
+      
+      return false
+    end
+  end
+  
+  # Call the prescribed hook as a script
+  def call_hook(hookname, arguments = [])
+    if opt(hookname).to_s() == ""
+      return
+    end
+    
+    if script_name() != ""
+      arguments << "--tungsten-script-name=#{script_name()}"
+    end
+    if command() != ""
+      arguments << "--tungsten-script-command=#{command()}"
+    end
+    arguments << "--tungsten-script-hook=#{hookname.to_s()}"
+    
+    begin
+      TU.cmd_result("#{opt(hookname)} #{arguments.join(" ")}")
+    rescue CommandError => ce
+      raise "There were errors while executing #{opt(hookname)}"
+    end
+  end
+  
+  def script_name
+    "tungsten_manage_configuration"
+  end
+  
+  def enable_script_log
+    if opt(:log) != nil
+      if @script_log_enabled != true
+        TU.set_log_path(opt(:log))
+      end
+      @script_log_enabled = true
+    end
+  end
+  
+  def script_log_path
+    if @script_log_enabled == true
+      opt(:log)
+    else
+      super()
+    end
+  end
+  
+  self.new().run()
+end

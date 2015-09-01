@@ -1,0 +1,379 @@
+#!/usr/bin/env ruby
+# Copyright (C) 2014 Continuent, Inc.
+# 
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License.  You may obtain
+# a copy of the License at
+# 
+#         http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+# License for the specific language governing permissions and limitations
+# under the License.
+#
+# Initial developer(s): Jeff Mace
+# Contributor(s):
+
+# TODO : Add commands to output host definitions in Chef form
+
+begin
+  require 'rubygems'
+  gem 'continuent-tools-core'
+rescue LoadError
+end
+
+require 'continuent-tools-core'
+
+class TungstenDirectoryProvider
+  def initialize(key)
+    @key = key
+  end
+  
+  def self.inherited(subclass)
+    @subclasses ||= []
+    @subclasses << subclass
+  end
+  
+  def self.subclasses
+    @subclasses
+  end
+  
+  def self.get_provider(key)
+    @subclasses.each{
+      |klass|
+      
+      regex = Regexp.new(klass.get_regex())
+      if key =~ regex
+        return klass.new(key)
+      end
+    }
+    
+    nil
+  end
+end
+
+Dir.glob(File.dirname(__FILE__) + '/../providers/*.rb').each do |file| 
+  begin
+    require file
+  rescue IgnoreError
+  end
+end
+
+class TungstenDirectory
+  include TungstenScript
+  private
+  
+  def main
+    directory_entries = collect_directory_entries()
+    
+    unless TU.is_valid?
+      return
+    end
+    
+    case command()
+    when "list"
+      TU.output(JSON.pretty_generate(directory_entries))
+    when "hosts"
+      if directory_entries.has_key?(opt(:hostname))
+        location = directory_entries[opt(:hostname)]["location"]
+      else
+        location = nil
+      end
+      hostsmap = generate_hosts_map(directory_entries, location)
+      hostsmap.keys().sort().each{
+        |h|
+        TU.output("#{hostsmap[h]}\t#{h}")
+      }
+    when "hosts_puppet_manifest"
+      if directory_entries.has_key?(opt(:hostname))
+        location = directory_entries[opt(:hostname)]["location"]
+      else
+        location = nil
+      end
+      hostsmap = generate_hosts_map(directory_entries, location)
+      hostsmap.keys().sort().each{
+        |h|
+        TU.output("host { '#{h}' : ip => '#{hostsmap[h]}', comment => 'Created by #{script_name()}'}")
+      }
+    end
+  end
+  
+  def collect_directory_entries
+    found_files = false
+    directory_entries = {}
+    
+    Dir.glob(opt(:config)).each{
+      |f|
+      found_files = true
+      
+      # Parse the configuration file and remove any sections
+      # that may hold command line options
+      contents = TU.parse_ini_file(f)
+      contents.delete("tungsten_directory")
+      contents.delete("directory")
+      
+      # Iterate through each section and merge directory entries
+      contents.each{
+        |k,v|
+        
+        matches = k.match("autodetect.(.*)")
+        if matches != nil and matches.size() > 0
+          # Search for a matching autodetect provider
+          provider = TungstenDirectoryProvider.get_provider(matches[1])
+          unless provider == nil
+            directory_entries.merge!(provider.get_entries(v))
+          else
+            TU.error("Unable to autodetect #{matches[1]} entries")
+          end
+        else
+          entry = parse_directory_entry(v)
+          hostname = k
+          if entry.has_key?("hostname")
+            hostname = entry["hostname"]
+          else
+            entry["hostname"] = hostname
+          end
+          
+          # Build a manual entry and add it to the list
+          directory_entries[k] = entry
+        end
+      }
+    }
+    
+    if found_files == false
+      raise "Unable to find any files at #{opt(:config)}"
+    end
+    
+    # Modify each directory entry and prepare it for output
+    directory_entries.each{
+      |id,entry|
+      unless entry["tags"].is_a?(Hash)
+        next
+      end
+      
+      unless entry["hostname"] != ""
+        TU.error("Entry '#{entry["id"]}' does not include a hostname")
+      end
+      
+      unless entry["location"] != ""
+        TU.error("Entry '#{entry["id"]}' does not include a location")
+      end
+      
+      entry["id"] = id
+      entry["tags"].each{
+        |k,v|
+        v = v.split(",")
+        if v.size() > 1
+          entry["tags"][k] = v
+        end
+      }
+    }
+    
+    if has_filters?()
+      directory_entries = apply_filters(directory_entries, opt(:filters))
+    end
+    
+    return directory_entries
+  end
+  
+  def parse_directory_entry(e)
+    entry = e.dup()
+    entry["tags"] = {}
+    entry["provider"] = "ini"
+    
+    e.keys().each{
+      |k|
+      parts = k.split(".")
+      if parts.size() == 1
+        next
+      end
+      
+      type = parts.shift()
+      remainder = parts.join(".")
+      
+      case type
+      when "tags"
+        entry["tags"][remainder] = entry[k]
+        entry.delete(k)
+      end
+    }
+    
+    return entry
+  end
+  
+  # For each entry include the private address if the host location
+  # matches the given location. Use the public address if there is no private
+  # address or the locations do not match.
+  def generate_hosts_map(directory_entries, location = nil)
+    hosts_map = {}
+    
+    directory_entries.each{
+      |hostname,entry|
+      if location != nil && entry["location"] == location
+        if entry.has_key?("private-address")
+          hosts_map[hostname] = entry["private-address"]
+        elsif entry.has_key?("public-address")
+          hosts_map[hostname] = entry["public-address"]
+        else
+          TU.error("Unable to find a private or public address for #{hostname}")
+        end
+      else
+        if entry.has_key?("public-address")
+          hosts_map[hostname] = entry["public-address"]
+        else
+          TU.error("Unable to find a public address for #{hostname}")
+        end
+      end
+    }
+    
+    return hosts_map
+  end
+  
+  def has_filters?
+    filters = opt(:filters)
+    
+    if filters == nil
+      return false
+    end
+    
+    if filters.is_a?(Array) && filters.count() > 0
+      return true
+    else
+      return false
+    end
+  end
+  
+  # Remove any entry that does not match the provided filters
+  def apply_filters(entries, filters)
+    filters.each{
+      |filter|
+      parts = filter.split("=")
+      
+      # Determine if the filter is joined with a '=' or '!='
+      last_char=parts[0][-1,1]
+      if last_char == "!"
+        test_equals = false
+        key = parts[0][0, parts[0].length()-1]
+        match = parts[1]
+      else
+        test_equals = true
+        key = parts[0]
+        match = parts[1]
+      end
+      
+      entries.each{
+        |e, entry|
+        # Find the key value in entry, or nil if it doesn't exist
+        value = find_entry_setting(entry, key)
+        
+        # Calculate if the returned value matches the filter value
+        if value.is_a?(Array)
+          is_equal = false
+          value.each{
+            |v|
+            if is_value_match?(v, match)
+              is_equal = true
+            end
+          }
+        else
+          is_equal = is_value_match?(value, match)
+        end
+        
+        # Delete the entry if the result of the match check isn't what
+        # the filter is looking for
+        if is_equal != test_equals
+          entries.delete(e)
+        end
+      }
+    }
+    
+    return entries
+  end
+  
+  def is_value_match?(value, match)
+    match = match.sub("%", ".*")
+    matches = value.to_s().match("^#{match}$")
+    if matches == nil
+      return false
+    else
+      return true
+    end
+  end
+  
+  def find_entry_setting(entry, key)
+    attrs = key.split(".")
+    attr_count = attrs.size
+    current_val = entry
+    for i in 0..(attr_count-1)
+      attr_name = attrs[i]
+      return current_val[attr_name] if i == (attr_count-1)
+      return nil if current_val[attr_name].nil?
+      current_val = current_val[attr_name]
+    end
+    
+    return nil
+  end
+  
+  def configure
+    super()
+    
+    require_installed_directory?(false)
+    
+    add_option(:config, {
+      :on => "--config String",
+      :help => "Path to INI file that holds directory information",
+      :default => "/etc/tungsten/directory.ini"
+    })
+    
+    add_option(:hostname, {
+      :on => "--hostname String",
+      :help => "Use this hostname for calculating hosts entries",
+      :default => TU.hostname()
+    })
+    
+    add_option(:filters, {
+      :on => "--filter String"
+    }) {|val|
+      unless @options.has_key?(:filters)
+        @options[:filters] = []
+      end
+
+      parts = val.split("=")
+      if parts.count() != 2
+        TU.error("Unable to parse --filter=#{val}. The filter should be in the form of 'key=value' or 'key!=value'.")
+      end
+
+      @options[:filters] << val
+      nil
+    }
+    
+    add_command(:list, {
+      :help => "Output the directory information as JSON",
+      :default => true
+    })
+    
+    add_command(:hosts, {
+      :help => "Output /etc/hosts entries for the directory hosts"
+    })
+    
+    add_command(:hosts_puppet_manifest, {
+      :help => "Output a Puppet manifest for the directory hosts"
+    })
+  end
+  
+  def validate
+    super()
+    
+    unless TU.is_valid?()
+      return TU.is_valid?()
+    end
+  end
+  
+  def script_name
+    "tungsten_directory"
+  end
+  
+  self.new().run()
+end
