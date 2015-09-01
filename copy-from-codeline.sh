@@ -18,10 +18,14 @@ rm -f ./tungsten.rb
 rm -rf ./tungsten
 rm -f ./iniparse.rb
 rm -rf ./iniparse
+rm -f ./ipparse.rb
+rm -rf ./ipparse
 
 cp $BUILDER_LIB_RUBY/tungsten.rb .
 cp -r $BUILDER_LIB_RUBY/tungsten .
 cp $BUILDER_LIB_RUBY/iniparse.rb .
 cp -r $BUILDER_LIB_RUBY/iniparse .
+cp $BUILDER_LIB_RUBY/ipparse.rb .
+cp -r $BUILDER_LIB_RUBY/ipparse .
 
 exit 0
