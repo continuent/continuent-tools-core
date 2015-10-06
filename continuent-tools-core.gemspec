@@ -17,7 +17,7 @@
 
 Gem::Specification.new do |s|
   s.name        = 'continuent-tools-core'
-  s.version     = '0.10.7'
+  s.version     = '0.11.0'
   s.date        = Date.today.to_s
   s.summary     = "Continuent Tungsten tools core functions"
   s.authors     = ["Continuent"]
@@ -30,7 +30,7 @@ Gem::Specification.new do |s|
     'https://github.com/continuent/continuent-tools-core'
   s.license       = 'Apache-2.0'
   s.add_runtime_dependency 'json_pure'
-  s.add_runtime_dependency 'net-ssh'
+  s.add_runtime_dependency 'net-ssh', '<=2.9.2'
   s.add_runtime_dependency 'net-scp'
   s.add_runtime_dependency 'xhr-ifconfig'
   s.add_runtime_dependency 'escape'
