@@ -31,18 +31,18 @@ class TungstenMigrateSchema
   
   def main
     if opt(:set) != nil
-      cmd = nil
-      case opt(:set).downcase()
-      when "maintenance"
-        cmd = "setmaintenance"
-      when "automatic"
-        cmd = "setautomatic"
-      when "manual"
-        cmd = "setmanual"
+      commands = []
+      if opt(:service).to_s() != ""
+        commands << "use #{opt(:service)}"
       end
+      commands << "set policy #{opt(:set)}"
       
-      mgr = TungstenDataserviceManager.new(TI.mgr_api_uri())
-      mgr.call(opt(:service), cmd)
+      cmd = "echo '#{commands.join(';')}' | #{TI.cctrl()}"
+      result = TU.cmd_result(cmd, true)
+      
+      unless result =~ /policy mode is now #{opt(:set).upcase()}/
+        raise MessageError.new("There was an error setting the policy")
+      end
     end
     
     status = TungstenStatus.new(TI, opt(:service))
@@ -68,6 +68,32 @@ class TungstenMigrateSchema
     
     unless TU.is_valid?()
       return TU.is_valid?()
+    end
+    
+    if opt(:set) != nil
+      opt(:set, opt(:set).downcase())
+      case opt(:set)
+      when "maintenance"
+        # Do nothing
+      when "automatic"
+        # Do nothing
+      when "manual"
+        # Do nothing
+      else
+        TU.error("Unable to set policy to #{opt(:set)}")
+      end
+    end
+    
+    if TI.dataservices().size() > 1
+      if opt(:service).to_s() == ""
+        TU.error("The --service argument is required because multiple dataservices are availble.")
+      end
+    end
+    
+    if opt(:service) != nil
+      unless TI.dataservices().include?(opt(:service))
+        TU.error("The #{opt(:service)} dataservice is not valid")
+      end
     end
   end
   
