@@ -164,7 +164,7 @@ class TungstenDirectory
       entry["id"] = id
       entry["tags"].each{
         |k,v|
-        v = v.split(",")
+        v = v.to_s().split(",")
         if v.size() > 1
           entry["tags"][k] = v
         end
