@@ -17,7 +17,7 @@
 
 Gem::Specification.new do |s|
   s.name        = 'continuent-tools-core'
-  s.version     = '0.12.0'
+  s.version     = '0.13.0'
   s.date        = Date.today.to_s
   s.summary     = "Continuent Tungsten tools core functions"
   s.authors     = ["Continuent"]
@@ -32,7 +32,6 @@ Gem::Specification.new do |s|
   s.add_runtime_dependency 'json_pure'
   s.add_runtime_dependency 'net-ssh', '<=2.9.2'
   s.add_runtime_dependency 'net-scp'
-  s.add_runtime_dependency 'xhr-ifconfig'
   s.add_runtime_dependency 'escape'
   s.add_runtime_dependency 'zip'
   s.add_runtime_dependency 'open4'
